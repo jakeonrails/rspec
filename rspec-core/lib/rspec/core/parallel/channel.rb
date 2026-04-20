@@ -70,6 +70,12 @@ module RSpec
         # across many workers' up-pipes simultaneously.
         attr_reader :up_read
 
+        # Returns the master-side write IO. Exposed so the pool can (a)
+        # pass the FD to `IO.select`'s writers array to learn when a worker
+        # has drained its input, and (b) close this end as the
+        # "no-more-work" EOF signal to the worker.
+        attr_reader :down_write
+
         def close
           [@down_read, @down_write, @up_read, @up_write].each do |io|
             io.close unless io.closed?

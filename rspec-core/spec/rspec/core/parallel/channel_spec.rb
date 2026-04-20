@@ -63,9 +63,9 @@ module RSpec::Core::Parallel
         channel.send_to_worker(:first)
         expect(channel.receive_from_worker).to eq([:got, :first])
 
-        # Signal shutdown by closing only the down-write end. We have to
-        # reach in for this because the public `close` drops both sides.
-        channel.instance_variable_get(:@down_write).close
+        # Signal shutdown by closing only the down-write end. The public
+        # `close` would drop all four FDs.
+        channel.down_write.close
         expect(channel.receive_from_worker).to eq([:eof, true])
 
         Process.waitpid(pid)
