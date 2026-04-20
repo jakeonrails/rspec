@@ -1,6 +1,16 @@
 ### Development
 [Full Changelog](https://github.com/rspec/rspec/compare/rspec-core-v3.13.6...main)
 
+Enhancements:
+
+* Add `--parallel[=N]` CLI flag, `config.parallel_workers`, and
+  `config.parallelize_before_fork` / `parallelize_setup` /
+  `parallelize_teardown` hooks. Runs example groups across N fork-based
+  worker processes; workers ship serialized notifications back to the
+  master so the existing formatter pipeline runs unchanged. Group-level
+  work units in this first pass. Available on platforms that support
+  `Process.fork`. (Jake Moffatt)
+
 # 4.0.0.beta1 / 2026-02-18
 
 Breaking Changes:

@@ -281,6 +281,45 @@ You can store command line options in a `.rspec` file in the project's root
 directory, and the `rspec` command will read them as though you typed them on
 the command line.
 
+## Parallel Execution
+
+Run example groups across multiple fork-based worker processes with
+`--parallel[=N]`:
+
+```
+rspec --parallel=4      # 4 workers
+rspec --parallel        # one worker per CPU (Etc.nprocessors)
+```
+
+Each worker loads your spec files pre-fork, so startup is paid once. The
+master runs `before(:suite)` and `after(:suite)` hooks once, straddling the
+pool. Workers run example groups pulled from a shared queue and ship
+serialized notifications back to the master, which drives the usual
+formatter pipeline.
+
+To prepare per-process resources (such as a new database connection),
+register fork lifecycle hooks:
+
+```ruby
+RSpec.configure do |config|
+  config.parallelize_before_fork do
+    # master-side, once, after before(:suite), before any worker is forked
+  end
+
+  config.parallelize_setup do |worker_number|
+    # worker-side, once per worker, after the fork
+  end
+
+  config.parallelize_teardown do |worker_number|
+    # worker-side, once per worker, before the worker exits
+  end
+end
+```
+
+`RSpec.parallel_worker_number` is available inside the worker and is `nil`
+on the master. Parallel execution requires a platform that supports
+`Process.fork`; otherwise `--parallel` is a no-op and specs run serially.
+
 ## Get Started
 
 Start with a simple example of behavior you expect from your system. Do
