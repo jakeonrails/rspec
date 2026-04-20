@@ -33,7 +33,9 @@ module RSpec
         end
 
         def run
+          RSpec.parallel_worker_number = @worker_number
           ReporterListener.install(@configuration, @channel, @worker_number)
+          @configuration.fire_parallelize_setup_hooks(@worker_number)
           @configuration.with_suite_hooks do
             loop do
               message = @channel.receive_from_master
@@ -42,6 +44,12 @@ module RSpec
             end
           end
         ensure
+          begin
+            @configuration.fire_parallelize_teardown_hooks(@worker_number)
+          rescue StandardError
+            # Teardown errors must not prevent worker_exit -- otherwise the
+            # master never learns this worker has stopped and waits KILL_TIMEOUT.
+          end
           @channel.send_to_master([:worker_exit, @worker_number])
           @channel.close
         end
