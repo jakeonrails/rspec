@@ -51,7 +51,30 @@ module RSpec
           def exception;            execution_result && execution_result.exception; end
         end
 
+        # Events that require per-type payload projection. Anything not
+        # listed here (e.g. `:seed`, `:message`, `:start`, `:deprecation`,
+        # `:close`, custom events) is a plain Struct or trivial value and
+        # ships as-is — the live notification objects Marshal fine.
+        EXAMPLE_EVENTS = [
+          :example_started, :example_finished, :example_passed,
+          :example_failed, :example_pending
+        ].freeze
+        GROUP_EVENTS = [:example_group_started, :example_group_finished].freeze
+
         class << self
+          # Dispatcher used by ReporterListener. Returns a value that can be
+          # Marshal'd and later fed back to the master's reconstitute step.
+          # Shape: [payload_kind, data]
+          def serialize_notification(event, notification)
+            if EXAMPLE_EVENTS.include?(event)
+              [:example, serialize_example(notification.example)]
+            elsif GROUP_EVENTS.include?(event)
+              [:group, serialize_group(notification.group)]
+            else
+              [:raw, notification]
+            end
+          end
+
           def serialize_example(example)
             SerializedExample.new(
               example.id,
