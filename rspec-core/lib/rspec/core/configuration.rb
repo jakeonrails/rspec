@@ -131,6 +131,13 @@ module RSpec
       add_setting :drb
 
       # @macro add_setting
+      # Number of fork-based workers to dispatch example groups across.
+      # `nil` or `1` disables parallel execution (serial, default).
+      # Setting to an Integer N >= 2 runs the suite across N workers.
+      # @return [Integer, nil]
+      add_setting :parallel_workers
+
+      # @macro add_setting
       # The drb_port (default: nil).
       add_setting :drb_port
 

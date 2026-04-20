@@ -111,6 +111,8 @@ module RSpec
       #   or the configured failure exit code (1 by default) if specs
       #   failed.
       def run_specs(example_groups)
+        return run_specs_in_parallel(example_groups) if parallel?
+
         examples_count = @world.example_count(example_groups)
         examples_passed = @configuration.reporter.report(examples_count) do |reporter|
           @configuration.with_suite_hooks do
@@ -123,6 +125,20 @@ module RSpec
         end
 
         exit_code(examples_passed)
+      end
+
+      # @private
+      def parallel?
+        @configuration.parallel_workers && @configuration.parallel_workers >= 2 &&
+          Process.respond_to?(:fork)
+      end
+
+      # @private
+      def run_specs_in_parallel(example_groups)
+        RSpec::Support.require_rspec_core "parallel/runner"
+        Parallel::Runner.new(
+          @configuration, @world, @configuration.parallel_workers
+        ).run_specs(example_groups)
       end
 
       # @private

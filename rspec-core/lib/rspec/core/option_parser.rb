@@ -75,6 +75,13 @@ module RSpec::Core
           options[:runner] = RSpec::Core::Invocations::Bisect.new
         end
 
+        parser.on('--parallel[=N]', Integer, 'Run example groups in N fork-based worker processes in parallel.',
+                  '  If N is omitted, uses the number of available CPUs.') do |n|
+          require 'etc'
+          count = n || Etc.nprocessors
+          options[:parallel_workers] = count < 2 ? nil : count
+        end
+
         parser.on('--[no-]fail-fast[=COUNT]', 'Abort the run after a certain number of failures (1 by default).') do |argument|
           if argument == true
             value = 1
