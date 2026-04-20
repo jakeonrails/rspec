@@ -16,13 +16,13 @@ module RSpec
       # @private
       class Worker
         # Work-queue wire protocol:
-        #   [:run_group, group_lookup_key] — run this example group
-        #   nil (EOF)                       — shut down cleanly
+        #   [:run_group, group_lookup_key] -- run this example group
+        #   nil (EOF)                       -- shut down cleanly
         #
         # Worker responses on up-pipe:
         #   [:event, event_name, worker_number, payload]   (via ReporterListener)
-        #   [:group_finished, group_lookup_key, :ok|:error] — request next unit
-        #   [:worker_exit, worker_number]                   — clean shutdown
+        #   [:group_finished, group_lookup_key, :ok|:error] -- request next unit
+        #   [:worker_exit, worker_number]                   -- clean shutdown
 
         def initialize(runner, channel, worker_number)
           @runner        = runner

@@ -4,7 +4,7 @@ module RSpec
       # Data transfer objects shipped from a worker to the master in place of
       # the live `Example`, `ExampleGroup`, `ExecutionResult`, and `Exception`
       # objects. They hold only the surface that core's built-in formatters
-      # read from those objects — reconstructed on the master so the existing
+      # read from those objects -- reconstructed on the master so the existing
       # formatter pipeline runs unchanged.
       #
       # Any symmetric `Example`-alike behavior should live here rather than
@@ -14,7 +14,7 @@ module RSpec
       # @private
       module Serializer
         # Keys from `Example#metadata` that core's own formatters read.
-        # Additional keys are preserved via best-effort Marshal — see
+        # Additional keys are preserved via best-effort Marshal -- see
         # `safe_metadata`.
         FORMATTER_METADATA_KEYS = [
           :file_path, :line_number, :extra_failure_lines,
@@ -54,7 +54,7 @@ module RSpec
         # Events that require per-type payload projection. Anything not
         # listed here (e.g. `:seed`, `:message`, `:start`, `:deprecation`,
         # `:close`, custom events) is a plain Struct or trivial value and
-        # ships as-is — the live notification objects Marshal fine.
+        # ships as-is -- the live notification objects Marshal fine.
         EXAMPLE_EVENTS = [
           :example_started, :example_finished, :example_passed,
           :example_failed, :example_pending

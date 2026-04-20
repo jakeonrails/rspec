@@ -6,7 +6,7 @@ module RSpec
       # Worker-side reporter listener. Registered against every event in
       # `Reporter::RSPEC_NOTIFICATIONS`; each callback serializes the
       # notification and ships it to the master over the Channel. Workers
-      # never drive the formatter chain themselves — the master does that
+      # never drive the formatter chain themselves -- the master does that
       # once, after rehydrating events from every worker in global order.
       #
       # @private
@@ -30,7 +30,7 @@ module RSpec
 
         # Register this listener against every event the reporter knows
         # about, in a single call. Replaces the configured formatters on
-        # the worker — we want exactly one listener that ships upstream.
+        # the worker -- we want exactly one listener that ships upstream.
         def self.install(configuration, channel, worker_number)
           configuration.reset_reporter
           reporter = configuration.reporter

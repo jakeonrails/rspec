@@ -32,7 +32,7 @@ module RSpec
 
         # Called by the master after forking a worker. Drops FDs that only
         # the worker side needs, so the kernel's refcount reaches zero when
-        # the worker exits — otherwise the master's `receive` blocks forever.
+        # the worker exits -- otherwise the master's `receive` blocks forever.
         def close_worker_ends
           @down_read.close
           @up_write.close
