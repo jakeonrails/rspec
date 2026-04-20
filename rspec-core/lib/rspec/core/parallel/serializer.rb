@@ -23,8 +23,23 @@ module RSpec
 
         SerializedExecutionResult = Struct.new(
           :status, :run_time, :pending_message, :pending_fixed,
-          :started_at, :finished_at, :exception
-        )
+          :started_at, :finished_at, :exception, :example_skipped,
+          :pending_exception
+        ) do
+          # ExampleNotification.for calls this to route between
+          # SkippedExampleNotification and FailedExampleNotification.
+          # Precomputed worker-side since the live flag uses
+          # `pending_exception`, which we don't carry over the wire as
+          # the live attribute.
+          def example_skipped?
+            example_skipped
+          end
+
+          # ExceptionPresenter::Factory and friends ask predicate-style.
+          def pending_fixed?
+            !!pending_fixed
+          end
+        end
 
         SerializedGroup = Struct.new(:description, :parent_groups_size, :metadata)
 
@@ -97,7 +112,9 @@ module RSpec
               result.pending_fixed,
               result.started_at,
               result.finished_at,
-              serialize_exception(result.exception)
+              serialize_exception(result.exception),
+              result.respond_to?(:example_skipped?) && result.example_skipped?,
+              serialize_exception(result.respond_to?(:pending_exception) ? result.pending_exception : nil)
             )
           end
 
