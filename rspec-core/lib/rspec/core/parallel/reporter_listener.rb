@@ -31,11 +31,21 @@ module RSpec
         # Register this listener against every event the reporter knows
         # about, in a single call. Replaces the configured formatters on
         # the worker -- we want exactly one listener that ships upstream.
+        #
+        # Workers must NOT also run the user's configured formatters
+        # (progress, documentation, etc.): their file descriptors are
+        # inherited from the master, so each worker's formatter would
+        # write dots/docs to the same stdout the master is writing to,
+        # duplicating output. We force Reporter's `@setup` flag after
+        # registering, which short-circuits `ensure_listeners_ready` and
+        # prevents the default formatter from being lazily added on the
+        # first notify.
         def self.install(configuration, channel, worker_number)
           configuration.reset_reporter
           reporter = configuration.reporter
           listener = new(channel, worker_number)
           reporter.register_listener(listener, *Reporter::RSPEC_NOTIFICATIONS.to_a)
+          reporter.instance_variable_set(:@setup, true)
           listener
         end
       end

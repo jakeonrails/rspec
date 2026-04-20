@@ -9,13 +9,23 @@ module RSpec
       # and dispatches it to the reporter, so the existing formatter
       # pipeline runs unchanged.
       #
-      # Kept pure (`rehydrate` returns `[event_name, notification]` or
-      # `nil` for non-event messages) so it's independently testable
-      # without a live reporter. `drive` is the thin glue that a Runner
-      # can call from inside `WorkerPool#run`'s block.
+      # Dispatches through the Reporter's event methods (e.g.
+      # `example_started(example)`) rather than `notify(event, notification)`,
+      # because the event methods maintain the Reporter's internal
+      # `@examples` / `@failed_examples` / `@pending_examples` arrays that
+      # SummaryNotification reads at the end of the run. Bypassing them
+      # means the final "N examples, M failures" line reads zero.
       #
       # @private
       class Rehydrator
+        # Events that go through a dedicated Reporter method. Others
+        # fall through to `notify`.
+        EXAMPLE_ROUTED = [
+          :example_started, :example_finished, :example_passed,
+          :example_failed, :example_pending
+        ].freeze
+        GROUP_ROUTED = [:example_group_started, :example_group_finished].freeze
+
         def initialize(reporter)
           @reporter = reporter
         end
@@ -24,46 +34,33 @@ module RSpec
         # events and ignores control messages (:group_finished,
         # :worker_exit). Returns nil.
         def handle(message)
-          event_name, notification = rehydrate(message)
-          @reporter.notify(event_name, notification) if event_name
-          nil
-        end
-
-        # Pure: decode a wire message into `[event_name, notification]`
-        # for dispatching, or nil for control messages.
-        def rehydrate(message)
           return nil unless message.is_a?(Array) && message.first == :event
           _, event_name, _worker_number, wrapped = message
           kind, data = wrapped
-          [event_name, build_notification(event_name, kind, data)]
+          dispatch(event_name, kind, data)
+          nil
         end
 
       private
 
-        def build_notification(event_name, kind, data)
+        def dispatch(event_name, kind, data)
           case kind
-          when :example then build_example_notification(event_name, data)
-          when :group   then Notifications::GroupNotification.new(data)
-          when :raw     then data
+          when :example
+            if EXAMPLE_ROUTED.include?(event_name)
+              @reporter.__send__(event_name, data)
+            else
+              @reporter.notify(event_name, Notifications::ExampleNotification.send(:new, data))
+            end
+          when :group
+            if GROUP_ROUTED.include?(event_name)
+              @reporter.__send__(event_name, data)
+            else
+              @reporter.notify(event_name, Notifications::GroupNotification.new(data))
+            end
+          when :raw
+            @reporter.notify(event_name, data)
           else
             raise ArgumentError, "Unknown parallel payload kind: #{kind.inspect}"
-          end
-        end
-
-        def build_example_notification(event_name, serialized_example)
-          case event_name
-          when :example_failed
-            Notifications::FailedExampleNotification.new(serialized_example)
-          when :example_pending
-            if serialized_example.execution_result &&
-               serialized_example.execution_result.example_skipped?
-              Notifications::SkippedExampleNotification.new(serialized_example)
-            else
-              Notifications::FailedExampleNotification.new(serialized_example)
-            end
-          else
-            # :example_started, :example_finished, :example_passed
-            Notifications::ExampleNotification.send(:new, serialized_example)
           end
         end
       end

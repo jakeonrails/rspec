@@ -59,6 +59,14 @@ module RSpec
           def parent_groups
             [self]
           end
+
+          # Reporter#example_group_started/finished skip the notify when
+          # this is empty (filtered-out groups). On the master side the
+          # worker has already selected which groups to run, so always
+          # return a non-empty sentinel to let notifications through.
+          def descendant_filtered_examples
+            [:sentinel].freeze
+          end
         end
 
         SerializedException = Struct.new(:class_name, :message, :backtrace, :cause) do
