@@ -41,7 +41,25 @@ module RSpec
           end
         end
 
-        SerializedGroup = Struct.new(:description, :parent_groups_size, :metadata)
+        SerializedGroup = Struct.new(
+          :description, :parent_groups_size, :metadata, :top_level_description
+        ) do
+          # `parent_groups` on the real class includes `self`, so a
+          # top-level group has size 1. Some formatters (documentation,
+          # html) branch on this for indentation.
+          def top_level?
+            parent_groups_size == 1
+          end
+
+          # Stub to satisfy listeners (notably Profiler) that read
+          # `group.parent_groups.last` as a hash key or count. We don't
+          # ship the full parent chain -- profiler metrics will key on
+          # the innermost group instead of the outermost ancestor for
+          # nested groups. `top_level_description` remains correct.
+          def parent_groups
+            [self]
+          end
+        end
 
         SerializedException = Struct.new(:class_name, :message, :backtrace, :cause) do
           # Duck-type as `Exception` for `ExceptionPresenter`, which reads
@@ -123,7 +141,8 @@ module RSpec
             SerializedGroup.new(
               group.description,
               group.parent_groups.size,
-              safe_metadata(group.metadata)
+              safe_metadata(group.metadata),
+              group.respond_to?(:top_level_description) ? group.top_level_description : group.description
             )
           end
 

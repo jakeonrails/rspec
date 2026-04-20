@@ -36,12 +36,13 @@ module RSpec
           RSpec.parallel_worker_number = @worker_number
           ReporterListener.install(@configuration, @channel, @worker_number)
           @configuration.fire_parallelize_setup_hooks(@worker_number)
-          @configuration.with_suite_hooks do
-            loop do
-              message = @channel.receive_from_master
-              break if message.nil?
-              handle(message)
-            end
+          # Suite hooks (before/after(:suite)) run once on the master,
+          # straddling the entire pool; re-running them per worker would
+          # both duplicate work and conflict on shared state.
+          loop do
+            message = @channel.receive_from_master
+            break if message.nil?
+            handle(message)
           end
         ensure
           begin
