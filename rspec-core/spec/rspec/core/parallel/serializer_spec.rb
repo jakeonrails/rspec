@@ -52,6 +52,60 @@ module RSpec::Core::Parallel
         serialized = Serializer.serialize_exception(inner)
         expect(serialized.class.name).to eq("RuntimeError")
       end
+
+      it "renders the class name cleanly under string interpolation" do
+        # ExceptionPresenter does `"#{exception.class}"` in some code paths;
+        # Struct's default to_s would surface `#<struct ClassStub name="X">`.
+        serialized = Serializer.serialize_exception(RuntimeError.new("x"))
+        expect("#{serialized.class}").to eq("RuntimeError")
+        expect(serialized.class.inspect).to eq("RuntimeError")
+      end
+    end
+
+    describe "rehydration of an exception class the master never sees" do
+      # Typical real-world shape: Rails app raises an app-defined exception
+      # (e.g. `MyApp::PaymentError`) inside a worker, ships the serialized
+      # form to the master, and the master's process does not have the Rails
+      # app loaded. The master must still render the failure message without
+      # trying to reconstruct the original class.
+      it "round-trips through Marshal without requiring the class on the master" do
+        worker_side = Class.new(StandardError) do
+          def self.name; "MyApp::ThisClassDoesNotExistOnTheMaster"; end
+        end
+        raised = worker_side.new("payment gateway timeout").tap do |e|
+          e.set_backtrace(["app/models/payment.rb:42:in `charge'"])
+        end
+
+        wire = Marshal.dump(Serializer.serialize_exception(raised))
+        # Simulate master: drop all reference to the worker-side class before
+        # rehydrating. Marshal.load must succeed anyway.
+        worker_side = nil # rubocop:disable Lint/UselessAssignment
+        restored = Marshal.load(wire)
+
+        expect(restored.class_name).to eq("MyApp::ThisClassDoesNotExistOnTheMaster")
+        expect(restored.message).to eq("payment gateway timeout")
+        expect(restored.backtrace).to eq(["app/models/payment.rb:42:in `charge'"])
+        expect(restored.class.name).to eq("MyApp::ThisClassDoesNotExistOnTheMaster")
+      end
+
+      it "preserves a cause chain whose classes are also absent from the master" do
+        inner_klass = Class.new(StandardError) do
+          def self.name; "MyApp::InnerError"; end
+        end
+        outer_klass = Class.new(StandardError) do
+          def self.name; "MyApp::OuterError"; end
+        end
+        inner = inner_klass.new("inner")
+        outer = outer_klass.new("outer")
+        outer.define_singleton_method(:cause) { inner }
+
+        wire = Marshal.dump(Serializer.serialize_exception(outer))
+        restored = Marshal.load(wire)
+
+        expect(restored.class_name).to eq("MyApp::OuterError")
+        expect(restored.cause.class_name).to eq("MyApp::InnerError")
+        expect(restored.cause.message).to eq("inner")
+      end
     end
 
     describe ".safe_metadata (via serialize_example)" do

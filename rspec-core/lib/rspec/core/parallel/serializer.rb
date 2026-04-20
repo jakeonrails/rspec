@@ -76,7 +76,13 @@ module RSpec
             ClassStub.new(class_name)
           end
 
-          ClassStub = Struct.new(:name)
+          # `Struct`'s default to_s would render `#<struct ClassStub name="X">`
+          # anywhere the presenter interpolates `"#{exception.class}"` (see
+          # ExceptionPresenter#exception_class_name). Mask the Struct form.
+          ClassStub = Struct.new(:name) do
+            def to_s; name.to_s; end
+            alias_method :inspect, :to_s
+          end
         end
 
         SerializedExample = Struct.new(
