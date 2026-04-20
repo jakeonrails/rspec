@@ -73,5 +73,108 @@ module RSpec::Core::Parallel
       expect(events.select { |e| e.first == :group_finished }).to be_empty
       expect(events.select { |e| e.first == :worker_exit }.size).to eq(2)
     end
+
+    context "SIGINT handling" do
+      # Worker shim that sleeps on each item, simulating slow work --
+      # ensures the master can interrupt mid-run without a race.
+      before do
+        stub_const("RSpec::Core::Parallel::Worker", Class.new do
+          def initialize(_runner, channel, worker_number)
+            @channel = channel
+            @worker_number = worker_number
+          end
+
+          def run
+            loop do
+              msg = @channel.receive_from_master
+              break if msg.nil?
+              _, key = msg
+              sleep 5
+              @channel.send_to_master([:group_finished, key, :ok])
+            end
+            @channel.send_to_master([:worker_exit, @worker_number])
+            @channel.close
+          end
+        end)
+      end
+
+      # Raise the master-side trap synchronously via a background thread
+      # that fires SIGINT once the pool is inside IO.select. Ruby delivers
+      # the trap on the main thread -- the next select iteration sets
+      # @aborting and the run loop breaks.
+      def trigger_sigint_after(seconds)
+        main = Thread.current
+        Thread.new do
+          sleep seconds
+          Process.kill(:INT, Process.pid)
+          main # keep reference
+        end
+      end
+
+      it "stops dispatching, terminates workers, and returns when SIGINT arrives mid-run" do
+        pool  = described_class.new(runner, 2)
+        queue = Array.new(10) { |i| "spec/long_#{i}_spec.rb:1" }
+        events = []
+
+        trigger_sigint_after(0.3)
+
+        start = Time.now
+        pool.run(queue) { |msg| events << msg }
+        duration = Time.now - start
+
+        # Pool exited well before all 10 * 5s items could finish, and
+        # within the KILL_TIMEOUT stages (5s TERM wait + 5s KILL).
+        expect(duration).to be < 15
+
+        # Not all queued work was consumed -- confirms we aborted
+        # rather than draining the whole queue.
+        finished_keys = events.select { |e| e.first == :group_finished }.map { |e| e[1] }
+        expect(finished_keys.size).to be < queue.size
+
+        # All forked workers are reaped, no stragglers alive.
+        pool.instance_variable_get(:@workers).each do |w|
+          alive = begin
+                    Process.kill(0, w.pid); true
+                  rescue Errno::ESRCH, Errno::EPERM
+                    false
+                  end
+          expect(alive).to be(false)
+        end
+      end
+
+      it "refuses to dispatch any work when SIGINT arrives before the first select" do
+        pool  = described_class.new(runner, 2)
+        queue = Array.new(4) { |i| "spec/s_#{i}_spec.rb:1" }
+        events = []
+
+        # Force @aborting true before the run loop starts by overriding
+        # install_signal_traps to also set the flag synchronously. This
+        # simulates "SIGINT delivered during spawn" without racing a
+        # real signal.
+        def pool.install_signal_traps
+          super
+          @aborting = true
+        end
+
+        start_pids = nil
+        pool.run(queue) do |msg|
+          events << msg
+          start_pids ||= @workers.map(&:pid) # rubocop friendly
+        end
+
+        # No group_finished events: we bailed before any worker got work.
+        expect(events.select { |e| e.first == :group_finished }).to be_empty
+
+        # Workers are reaped cleanly.
+        pool.instance_variable_get(:@workers).each do |w|
+          alive = begin
+                    Process.kill(0, w.pid); true
+                  rescue Errno::ESRCH, Errno::EPERM
+                    false
+                  end
+          expect(alive).to be(false)
+        end
+      end
+    end
   end
 end
