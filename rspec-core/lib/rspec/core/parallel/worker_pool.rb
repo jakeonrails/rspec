@@ -101,7 +101,11 @@ module RSpec
             pid = Process.fork do
               channel.close_master_ends
               Worker.new(@runner, channel, n).run
-              exit!(0)
+              # Kernel#exit (not exit!) so third-party at_exit hooks fire --
+              # e.g. Capybara's Selenium driver cleanup. Runner.invoke is
+              # idempotent across fork, so the autorun at_exit won't re-run
+              # the suite here.
+              exit(0)
             end
             Process.detach(pid)
             channel.close_worker_ends

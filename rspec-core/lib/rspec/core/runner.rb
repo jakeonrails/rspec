@@ -41,6 +41,13 @@ module RSpec
       # Runs the suite of specs and exits the process with an appropriate exit
       # code.
       def self.invoke
+        # Idempotent: if invoke has already run in this process (or a parent
+        # whose state we inherited across a fork), don't re-enter. This lets
+        # parallel workers exit via Kernel#exit so third-party at_exit hooks
+        # -- e.g. Capybara's driver cleanup -- can fire, without the autorun
+        # hook re-running the whole suite inside each worker.
+        return if @invoked
+        @invoked = true
         disable_autorun!
         status = run(ARGV, $stderr, $stdout).to_i
         exit(status) if status != 0

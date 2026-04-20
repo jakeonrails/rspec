@@ -74,6 +74,59 @@ module RSpec::Core::Parallel
       expect(events.select { |e| e.first == :worker_exit }.size).to eq(2)
     end
 
+    context "at_exit hooks in workers" do
+      # Regression: `exit!(0)` in the worker fork block used to skip at_exit,
+      # which leaked Capybara/Selenium headless-browser processes in real
+      # Rails suites (one at_exit per worker, N workers, N * (chromedriver +
+      # helpers) surviving). Workers now exit via Kernel#exit; this spec
+      # locks in the contract by registering a tmpfile-touching at_exit
+      # inside the worker shim and asserting it ran.
+      it "runs Kernel at_exit hooks registered inside workers before the process terminates" do
+        require 'tmpdir'
+        dir = Dir.mktmpdir("rspec-parallel-at-exit")
+        begin
+          stub_const("RSpec::Core::Parallel::Worker", Class.new do
+            def initialize(_runner, channel, worker_number)
+              @channel = channel
+              @worker_number = worker_number
+              @marker = File.join(ENV.fetch("RSPEC_PARALLEL_AT_EXIT_DIR"), "worker-#{worker_number}.touched")
+              at_exit { File.write(@marker, "ok") }
+            end
+
+            def run
+              loop do
+                msg = @channel.receive_from_master
+                break if msg.nil?
+              end
+              @channel.send_to_master([:worker_exit, @worker_number])
+              @channel.close
+            end
+          end)
+
+          ENV["RSPEC_PARALLEL_AT_EXIT_DIR"] = dir
+          pool = described_class.new(runner, 2)
+          pool.run([]) { |_| }
+
+          # Workers are detached; give them a brief moment to exit through
+          # at_exit on a loaded CI machine before we check markers.
+          deadline = Time.now + 5
+          until Time.now > deadline &&
+                File.exist?(File.join(dir, "worker-0.touched")) &&
+                File.exist?(File.join(dir, "worker-1.touched"))
+            break if File.exist?(File.join(dir, "worker-0.touched")) &&
+                     File.exist?(File.join(dir, "worker-1.touched"))
+            sleep 0.05
+          end
+
+          expect(File).to exist(File.join(dir, "worker-0.touched"))
+          expect(File).to exist(File.join(dir, "worker-1.touched"))
+        ensure
+          ENV.delete("RSPEC_PARALLEL_AT_EXIT_DIR")
+          FileUtils.remove_entry(dir) if File.directory?(dir)
+        end
+      end
+    end
+
     context "SIGINT handling" do
       # Worker shim that sleeps on each item, simulating slow work --
       # ensures the master can interrupt mid-run without a race.
