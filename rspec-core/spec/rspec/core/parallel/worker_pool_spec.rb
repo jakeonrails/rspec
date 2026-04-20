@@ -127,6 +127,61 @@ module RSpec::Core::Parallel
       end
     end
 
+    context "worker crash mid-group" do
+      # Shim whose first worker to receive the sentinel key hard-exits. A
+      # filesystem marker enforces "crash exactly once" -- the requeue lands
+      # on a different worker, which then completes the key normally. This
+      # models a segfault / OOM-kill mid-group.
+      it "requeues the in-flight key and completes with another worker" do
+        require 'tmpdir'
+        dir = Dir.mktmpdir("rspec-crash-test")
+        marker = File.join(dir, "crashed_once")
+        ENV["RSPEC_CRASH_MARKER"] = marker
+
+        stub_const("RSpec::Core::Parallel::Worker", Class.new do
+          def initialize(_runner, channel, worker_number)
+            @channel = channel
+            @worker_number = worker_number
+          end
+
+          def run
+            loop do
+              msg = @channel.receive_from_master
+              break if msg.nil?
+              _, key = msg
+              if key == "CRASH_ME" && !File.exist?(ENV.fetch("RSPEC_CRASH_MARKER"))
+                File.write(ENV.fetch("RSPEC_CRASH_MARKER"), "1")
+                # exit! skips at_exit and doesn't send :group_finished --
+                # the pipe closes abruptly, simulating a segfault.
+                Kernel.exit!(0)
+              end
+              @channel.send_to_master([:group_finished, key, :ok])
+            end
+            @channel.send_to_master([:worker_exit, @worker_number])
+            @channel.close
+          end
+        end)
+
+        pool  = described_class.new(runner, 2)
+        queue = ["spec/a_spec.rb:1", "CRASH_ME", "spec/b_spec.rb:1", "spec/c_spec.rb:1"]
+        events = []
+
+        begin
+          pool.run(queue) { |msg| events << msg }
+
+          finished_keys = events.select { |e| e.first == :group_finished }.map { |e| e[1] }
+          expect(finished_keys).to match_array(queue)
+
+          crash_events = events.select { |e| e.first == :worker_crashed }
+          expect(crash_events.size).to eq(1)
+          expect(crash_events.first[2]).to eq("CRASH_ME")
+        ensure
+          ENV.delete("RSPEC_CRASH_MARKER")
+          FileUtils.remove_entry(dir) if File.directory?(dir)
+        end
+      end
+    end
+
     context "SIGINT handling" do
       # Worker shim that sleeps on each item, simulating slow work --
       # ensures the master can interrupt mid-run without a race.

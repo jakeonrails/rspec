@@ -28,8 +28,12 @@ module RSpec
       class WorkerPool
         KILL_TIMEOUT = 5.0 # seconds
 
-        WorkerRecord = Struct.new(:number, :pid, :channel, :state) do
+        WorkerRecord = Struct.new(:number, :pid, :channel, :state, :current_key) do
           # state transitions: :idle -> :busy -> :idle -> ... -> :exited
+          # current_key: the group key the worker is processing right now,
+          # set on dispatch and cleared on :group_finished. If the worker's
+          # pipe closes while current_key is set, the worker crashed
+          # mid-group and we requeue that key.
           def idle?;   state == :idle;   end
           def busy?;   state == :busy;   end
           def exited?; state == :exited; end
@@ -69,6 +73,7 @@ module RSpec
               message = worker.channel.receive_from_worker
 
               if message.nil?
+                requeue_if_crashed_mid_group(worker, remaining, &block)
                 reap_worker(worker)
               else
                 update_worker_state(worker, message)
@@ -83,6 +88,7 @@ module RSpec
               key = remaining.shift
               worker.channel.send_to_worker([:run_group, key])
               worker.state = :busy
+              worker.current_key = key
             end
 
             break if @aborting
@@ -136,9 +142,26 @@ module RSpec
 
         def update_worker_state(worker, message)
           case message.first
-          when :group_finished then worker.state = :idle
-          when :worker_exit    then worker.state = :exited
+          when :group_finished
+            worker.state = :idle
+            worker.current_key = nil
+          when :worker_exit
+            worker.state = :exited
           end
+        end
+
+        # Called when a worker's pipe closes unexpectedly. If the worker was
+        # holding a key (crashed mid-group rather than after clean shutdown),
+        # unshift it back so the next idle worker picks it up, and emit a
+        # synthetic :worker_crashed event so the caller can surface it.
+        # No-op during @aborting: the caller is giving up, not redistributing.
+        def requeue_if_crashed_mid_group(worker, remaining, &block)
+          return if @aborting
+          return unless worker.current_key
+          crashed_key = worker.current_key
+          worker.current_key = nil
+          remaining.unshift(crashed_key)
+          block.call([:worker_crashed, worker.number, crashed_key]) if block
         end
 
         def done?(remaining)
