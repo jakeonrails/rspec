@@ -40,7 +40,15 @@ module RSpec::Core
   end
 
   RSpec.describe "RSpec.parallel_worker_number" do
-    after { RSpec.parallel_worker_number = nil }
+    # Save/restore so these tests pass even when running rspec-core's own
+    # suite under --parallel -- the worker sets parallel_worker_number to
+    # its index before running, which is the correct production behavior
+    # but violates this block's "default is nil" assertion unless isolated.
+    before do
+      @prev_worker_number = RSpec.parallel_worker_number
+      RSpec.parallel_worker_number = nil
+    end
+    after { RSpec.parallel_worker_number = @prev_worker_number }
 
     it "is nil by default" do
       expect(RSpec.parallel_worker_number).to be_nil
