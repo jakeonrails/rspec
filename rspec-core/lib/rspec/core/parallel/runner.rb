@@ -56,8 +56,17 @@ module RSpec
         # Group-granularity queue. Mixed-granularity (per-example work
         # units for groups without `before(:context)` hooks) is a later
         # expansion; default stays group-level for correctness.
+        #
+        # Keys are `ExampleGroup#id` ("<rerun_file_path>[<scoped_id>]"),
+        # not `metadata[:location]`. `:location` is only file:line and
+        # collides for groups declared on the same line -- e.g.
+        # `[Foo, Bar].each { |k| RSpec.describe(k) { ... } }` generates
+        # two groups whose locations are identical. `scoped_id` is a
+        # per-file declaration-order index, so `id` is unique per group
+        # and stable across fork (children inherit the same declaration
+        # order via COW).
         def build_queue(example_groups)
-          example_groups.map { |g| g.metadata[:location] }
+          example_groups.map(&:id)
         end
 
         def drive_pool(queue, reporter)

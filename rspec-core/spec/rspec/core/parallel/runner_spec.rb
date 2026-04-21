@@ -42,6 +42,18 @@ module RSpec::Core::Parallel
       RSpec.instance_variable_set(:@world, saved_world)
     end
 
+    # ExampleGroup#id is derived from `world.num_example_groups_defined_in(file)`,
+    # which only increments on `world.record(group)` -- NOT on describe return.
+    # In real usage RSpec.describe records in between top-level describes via
+    # DSL; these test fixtures use ExampleGroup.describe directly, so we must
+    # record each group before declaring the next, or both will get scoped_id=1
+    # and collide on id.
+    def declare(world, name, &block)
+      group = RSpec::Core::ExampleGroup.describe(name, &block)
+      world.record(group)
+      group
+    end
+
     it "fires hooks in master/worker roles, dispatches across workers, and returns 0 on pass" do
       with_isolated_rspec_state do
         config = build_configuration
@@ -62,9 +74,8 @@ module RSpec::Core::Parallel
           File.open(td_log, "a") { |f| f.puts "worker:#{n}:#{Process.pid}" }
         end
 
-        group_a = RSpec::Core::ExampleGroup.describe("A") { it("passes a") {} }
-        group_b = RSpec::Core::ExampleGroup.describe("B") { it("passes b") {} }
-        [group_a, group_b].each { |g| world.record(g) }
+        group_a = declare(world, "A") { it("passes a") {} }
+        group_b = declare(world, "B") { it("passes b") {} }
         world.instance_variable_set(:@example_groups_and_filters_loaded, true)
 
         runner = described_class.new(config, world, 2)
@@ -90,11 +101,10 @@ module RSpec::Core::Parallel
         RSpec.instance_variable_set(:@configuration, config)
         RSpec.instance_variable_set(:@world, world)
 
-        passing = RSpec::Core::ExampleGroup.describe("Pass") { it("passes") {} }
-        failing = RSpec::Core::ExampleGroup.describe("Fail") do
+        passing = declare(world, "Pass") { it("passes") {} }
+        failing = declare(world, "Fail") do
           it("fails") { expect(1).to eq(2) }
         end
-        [passing, failing].each { |g| world.record(g) }
         world.instance_variable_set(:@example_groups_and_filters_loaded, true)
 
         runner = described_class.new(config, world, 2)
@@ -111,6 +121,85 @@ module RSpec::Core::Parallel
 
         runner = described_class.new(config, world, 2)
         expect(runner.run_specs([])).to eq(0)
+      end
+    end
+
+    it "orders examples within a group reproducibly across parallel runs given the same seed" do
+      # Contract: output *order across workers* is non-deterministic, but
+      # for a fixed seed, each group's *within-group* example order is
+      # reproducible. Catches regressions where a worker re-seeds after
+      # fork or the ordering strategy is re-evaluated with fresh random
+      # state instead of inheriting the master's seed via COW.
+      order_log_a = File.join(tmpdir, "order_a.log")
+      order_log_b = File.join(tmpdir, "order_b.log")
+
+      run = lambda do |log, seed|
+        with_isolated_rspec_state do
+          config = build_configuration
+          world  = build_world(config)
+          RSpec.instance_variable_set(:@configuration, config)
+          RSpec.instance_variable_set(:@world, world)
+          config.seed = seed
+
+          path = log
+          group = declare(world, "Ordered") do
+            20.times do |i|
+              it("example #{i}") { File.open(path, "a") { |f| f.puts i } }
+            end
+          end
+          world.instance_variable_set(:@example_groups_and_filters_loaded, true)
+
+          runner = described_class.new(config, world, 2)
+          runner.run_specs([group])
+        end
+      end
+
+      run.call(order_log_a, 1234)
+      run.call(order_log_b, 1234)
+
+      expect(File.readlines(order_log_a)).to eq(File.readlines(order_log_b))
+    end
+
+    it "runs every group when multiple top-level describes share a source line" do
+      # Regression: we used to key the queue by metadata[:location] (file:line),
+      # which collides when describes are generated in a loop or eval'd from
+      # the same line. The first group would run twice and the later groups
+      # would silently disappear -- failures in them would never surface.
+      #
+      # We simulate the collision by forcing two groups to advertise the same
+      # :location metadata. ExampleGroup#id still differs (scoped_id is a
+      # per-file declaration-index path), so both must run.
+      with_isolated_rspec_state do
+        config = build_configuration
+        world  = build_world(config)
+        RSpec.instance_variable_set(:@configuration, config)
+        RSpec.instance_variable_set(:@world, world)
+
+        ran_log = File.join(tmpdir, "ran.log")
+        path_for_closure = ran_log
+
+        group_one = declare(world, "One") do
+          it("runs one") { File.open(path_for_closure, "a") { |f| f.puts "one" } }
+        end
+        group_two = declare(world, "Two") do
+          it("fails two") do
+            File.open(path_for_closure, "a") { |f| f.puts "two" }
+            expect(1).to eq(2)
+          end
+        end
+
+        # Force location collision: both groups claim the same file:line.
+        collision_location = "./spec/collides_spec.rb:1"
+        group_one.metadata[:location] = collision_location
+        group_two.metadata[:location] = collision_location
+
+        world.instance_variable_set(:@example_groups_and_filters_loaded, true)
+
+        runner = described_class.new(config, world, 2)
+        exit_code = runner.run_specs([group_one, group_two])
+
+        expect(File.readlines(ran_log).map(&:chomp)).to match_array(%w[one two])
+        expect(exit_code).to eq(config.failure_exit_code)
       end
     end
   end

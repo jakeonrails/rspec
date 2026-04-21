@@ -69,11 +69,14 @@ module RSpec
           end
         end
 
-        # Groups are identified by their source location (file + line), which
-        # is stable across the fork and unique within a suite. Richer keying
-        # (seed-ordered index) is a later optimization.
+        # Groups are identified by `ExampleGroup#id`, which composes
+        # `rerun_file_path` with a per-file declaration-order `scoped_id`.
+        # Stable across the fork (children inherit declaration order via
+        # COW) and unique per group, even when two top-level describes
+        # sit on the same source line (dynamically-generated describes,
+        # eval'd specs, etc).
         def resolve_group(key)
-          @world.ordered_example_groups.find { |g| g.metadata[:location] == key } \
+          @world.ordered_example_groups.find { |g| g.id == key } \
             or raise "Parallel worker #{@worker_number} could not resolve group #{key.inspect}"
         end
 
