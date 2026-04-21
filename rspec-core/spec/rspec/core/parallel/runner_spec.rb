@@ -202,5 +202,33 @@ module RSpec::Core::Parallel
         expect(exit_code).to eq(config.failure_exit_code)
       end
     end
+
+    it "updates the runtime log with timings for groups that ran, preserving untouched keys" do
+      with_isolated_rspec_state do
+        config = build_configuration
+        world  = build_world(config)
+        RSpec.instance_variable_set(:@configuration, config)
+        RSpec.instance_variable_set(:@world, world)
+
+        log_path = File.join(tmpdir, "runtime.log")
+        config.parallel_runtime_log_path = log_path
+
+        group_a = declare(world, "A") { it("passes a") {} }
+        group_b = declare(world, "B") { it("passes b") {} }
+        world.instance_variable_set(:@example_groups_and_filters_loaded, true)
+
+        # Seed a prior log entry for a spec that isn't in this run --
+        # it must survive (filtered-run preservation).
+        File.write(log_path, "./spec/filtered_spec.rb:1\t9.999\n")
+
+        runner = described_class.new(config, world, 2)
+        expect(runner.run_specs([group_a, group_b])).to eq(0)
+
+        timings = Balancer.read_log(log_path)
+        expect(timings["./spec/filtered_spec.rb:1"]).to eq(9.999)
+        expect(timings[group_a.id]).to be_a(Float).and(be > 0)
+        expect(timings[group_b.id]).to be_a(Float).and(be > 0)
+      end
+    end
   end
 end

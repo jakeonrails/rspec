@@ -10,6 +10,14 @@ Enhancements:
   master so the existing formatter pipeline runs unchanged. Group-level
   work units in this first pass. Available on platforms that support
   `Process.fork`. (Jake Moffatt)
+* Add `config.parallel_runtime_log_path` (default
+  `./.rspec_parallel_runtime.log`). When set, `--parallel` records
+  per-group wall-clock timings and reuses them on the next run to
+  LPT-sort the queue so known-slow groups dispatch first, preventing
+  a single slow file from becoming the critical-path tail. Newly added
+  groups slot ahead of known groups on their first run. Filtered and
+  interrupted runs preserve timings for groups they didn't touch.
+  (Jake Moffatt)
 
 # 4.0.0.beta1 / 2026-02-18
 

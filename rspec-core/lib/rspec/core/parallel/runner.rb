@@ -1,3 +1,4 @@
+RSpec::Support.require_rspec_core "parallel/balancer"
 RSpec::Support.require_rspec_core "parallel/rehydrator"
 RSpec::Support.require_rspec_core "parallel/worker_pool"
 
@@ -20,6 +21,11 @@ module RSpec
       # reporter -> WorkerPool yields to us -> Rehydrator dispatches to
       # the master reporter -> master formatters fire unchanged.
       #
+      # If `configuration.parallel_runtime_log_path` is set, the queue
+      # is LPT-sorted against the prior log before dispatch, and the
+      # log is updated (merge-preserving filtered-out keys) after the
+      # run completes. See Parallel::Balancer.
+      #
       # @private
       class Runner
         attr_reader :configuration, :world
@@ -36,6 +42,12 @@ module RSpec
           examples_count = @world.example_count(example_groups)
           queue = build_queue(example_groups)
 
+          log_path = @configuration.parallel_runtime_log_path
+          prior_timings = Balancer.read_log(log_path)
+          queue = Balancer.sort_queue(queue, prior_timings)
+
+          new_timings = {}
+
           all_ok = @configuration.reporter.report(examples_count) do |reporter|
             @configuration.with_suite_hooks do
               if examples_count == 0 && @configuration.fail_if_no_examples
@@ -44,9 +56,14 @@ module RSpec
 
               @configuration.fire_parallelize_before_fork_hooks
 
-              drive_pool(queue, reporter)
+              drive_pool(queue, reporter, new_timings)
             end
           end
+
+          # Merge order: current run's timings win for keys that ran,
+          # prior log preserves keys the run didn't touch (filter,
+          # Ctrl-C mid-run, etc).
+          Balancer.write_log(log_path, prior_timings.merge(new_timings)) if log_path
 
           all_ok ? 0 : @configuration.failure_exit_code
         end
@@ -69,7 +86,7 @@ module RSpec
           example_groups.map(&:id)
         end
 
-        def drive_pool(queue, reporter)
+        def drive_pool(queue, reporter, timings_out)
           rehydrator = Rehydrator.new(reporter)
           statuses = {}
 
@@ -79,8 +96,9 @@ module RSpec
             when :event
               rehydrator.handle(message)
             when :group_finished
-              _, key, status = message
+              _, key, status, elapsed = message
               statuses[key] = status
+              timings_out[key] = elapsed if elapsed
             end
           end
 

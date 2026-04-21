@@ -138,6 +138,17 @@ module RSpec
       add_setting :parallel_workers
 
       # @macro add_setting
+      # Path to the runtime log used by the parallel queue balancer.
+      # When present, groups are dispatched slowest-first so a single
+      # long-running group doesn't become the critical-path tail of
+      # the run. The log is rewritten after each parallel run,
+      # preserving entries for groups that didn't execute (filtered
+      # runs, Ctrl-C). Set to `nil` to disable balancing entirely.
+      # Default: `./.rspec_parallel_runtime.log`.
+      # @return [String, nil]
+      add_setting :parallel_runtime_log_path
+
+      # @macro add_setting
       # The drb_port (default: nil).
       add_setting :drb_port
 
@@ -460,6 +471,8 @@ module RSpec
         @parallelize_before_fork_hooks = []
         @parallelize_setup_hooks       = []
         @parallelize_teardown_hooks    = []
+
+        @parallel_runtime_log_path = "./.rspec_parallel_runtime.log"
 
         @mock_framework = nil
         @files_or_directories_to_run = []

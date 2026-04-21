@@ -20,9 +20,15 @@ module RSpec
         #   nil (EOF)                       -- shut down cleanly
         #
         # Worker responses on up-pipe:
-        #   [:event, event_name, worker_number, payload]   (via ReporterListener)
-        #   [:group_finished, group_lookup_key, :ok|:error] -- request next unit
-        #   [:worker_exit, worker_number]                   -- clean shutdown
+        #   [:event, event_name, worker_number, payload]       (via ReporterListener)
+        #   [:group_finished, key, :ok|:error, elapsed_seconds] -- request next unit
+        #   [:worker_exit, worker_number]                       -- clean shutdown
+        #
+        # `elapsed_seconds` is monotonic wall-clock time for the group
+        # (including its hooks), used by the master to update the
+        # runtime log for LPT-balancing the next run. Readers that
+        # predate this field (test shims) work unchanged -- the master
+        # treats a missing value as "no timing data."
 
         def initialize(runner, channel, worker_number)
           @runner        = runner
@@ -62,8 +68,10 @@ module RSpec
           when :run_group
             _, key = message
             group = resolve_group(key)
+            started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
             status = run_group(group)
-            @channel.send_to_master([:group_finished, key, status])
+            elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+            @channel.send_to_master([:group_finished, key, status, elapsed])
           else
             raise ArgumentError, "Unknown parallel message: #{message.inspect}"
           end
