@@ -41,6 +41,13 @@ module RSpec
       # Runs the suite of specs and exits the process with an appropriate exit
       # code.
       def self.invoke
+        # Idempotent: if invoke has already run in this process (or a parent
+        # whose state we inherited across a fork), don't re-enter. This lets
+        # parallel workers exit via Kernel#exit so third-party at_exit hooks
+        # -- e.g. Capybara's driver cleanup -- can fire, without the autorun
+        # hook re-running the whole suite inside each worker.
+        return if @invoked
+        @invoked = true
         disable_autorun!
         status = run(ARGV, $stderr, $stdout).to_i
         exit(status) if status != 0
@@ -111,6 +118,8 @@ module RSpec
       #   or the configured failure exit code (1 by default) if specs
       #   failed.
       def run_specs(example_groups)
+        return run_specs_in_parallel(example_groups) if parallel?
+
         examples_count = @world.example_count(example_groups)
         examples_passed = @configuration.reporter.report(examples_count) do |reporter|
           @configuration.with_suite_hooks do
@@ -123,6 +132,37 @@ module RSpec
         end
 
         exit_code(examples_passed)
+      end
+
+      # @private
+      def parallel?
+        effective_parallel_workers >= 2 && Process.respond_to?(:fork)
+      end
+
+      # @private
+      def run_specs_in_parallel(example_groups)
+        RSpec::Support.require_rspec_core "parallel/runner"
+        Parallel::Runner.new(
+          @configuration, @world, effective_parallel_workers
+        ).run_specs(example_groups)
+      end
+
+      # @private
+      # Resolution order: explicit `parallel_workers` (set via --parallel
+      # on the CLI) takes precedence; otherwise fall back to
+      # `default_parallel_workers` if configured.
+      def effective_parallel_workers
+        explicit = @configuration.parallel_workers
+        return explicit unless explicit.nil?
+        case @configuration.default_parallel_workers
+        when :number_of_processors
+          require 'etc'
+          Etc.nprocessors
+        when Integer
+          @configuration.default_parallel_workers
+        else
+          0
+        end
       end
 
       # @private

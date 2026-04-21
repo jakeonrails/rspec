@@ -131,6 +131,35 @@ module RSpec
       add_setting :drb
 
       # @macro add_setting
+      # Number of fork-based workers to dispatch example groups across.
+      # `nil` or `1` disables parallel execution (serial, default).
+      # Setting to an Integer N >= 2 runs the suite across N workers.
+      # @return [Integer, nil]
+      add_setting :parallel_workers
+
+      # @macro add_setting
+      # Fallback worker count used when `--parallel` is not passed on
+      # the CLI. Accepts an Integer, the symbol `:number_of_processors`
+      # (resolved at run time via `Etc.nprocessors`), or `nil` (default,
+      # serial). This is the knob for running parallel by default in a
+      # project's `spec_helper.rb` / `rails_helper.rb` without forcing
+      # every invocation to pass `--parallel`.
+      # Precedence: `--parallel[=N]` on the CLI wins when provided.
+      # @return [Integer, Symbol, nil]
+      add_setting :default_parallel_workers
+
+      # @macro add_setting
+      # Path to the runtime log used by the parallel queue balancer.
+      # When present, groups are dispatched slowest-first so a single
+      # long-running group doesn't become the critical-path tail of
+      # the run. The log is rewritten after each parallel run,
+      # preserving entries for groups that didn't execute (filtered
+      # runs, Ctrl-C). Set to `nil` to disable balancing entirely.
+      # Default: `./.rspec_parallel_runtime.log`.
+      # @return [String, nil]
+      add_setting :parallel_runtime_log_path
+
+      # @macro add_setting
       # The drb_port (default: nil).
       add_setting :drb_port
 
@@ -449,6 +478,12 @@ module RSpec
 
         @before_suite_hooks = []
         @after_suite_hooks  = []
+
+        @parallelize_before_fork_hooks = []
+        @parallelize_setup_hooks       = []
+        @parallelize_teardown_hooks    = []
+
+        @parallel_runtime_log_path = "./.rspec_parallel_runtime.log"
 
         @mock_framework = nil
         @files_or_directories_to_run = []
@@ -1922,6 +1957,63 @@ module RSpec
       def around(scope=nil, *meta, &block)
         add_hook_to_existing_matching_groups(meta, scope) { |g| g.around(scope, *meta, &block) }
         super(scope, *meta, &block)
+      end
+
+      # Registers `block` to be run on the parent process once, before any
+      # worker is forked. Use for setup that's cheap and safe to inherit
+      # via copy-on-write (loading gems, connecting to a template DB).
+      # Multiple blocks may be registered; they run in registration order.
+      #
+      #     RSpec.configure do |c|
+      #       c.parallelize_before_fork do
+      #         ActiveRecord::Base.establish_connection
+      #       end
+      #     end
+      #
+      # No-op when the runner is serial.
+      def parallelize_before_fork(&block)
+        @parallelize_before_fork_hooks << block
+      end
+
+      # Registers `block` to be run inside each forked worker, after the
+      # fork, before the worker processes its first example. The block
+      # receives the 0-indexed worker number. Use for per-worker setup
+      # that must not be shared (unique DB names, distinct output paths).
+      # Multiple blocks may be registered; they run in registration order.
+      #
+      #     RSpec.configure do |c|
+      #       c.parallelize_setup do |worker_number|
+      #         ENV["TEST_ENV_NUMBER"] = (worker_number + 1).to_s
+      #       end
+      #     end
+      def parallelize_setup(&block)
+        @parallelize_setup_hooks << block
+      end
+
+      # Registers `block` to be run inside each forked worker, after the
+      # last example has finished, before the worker exits. The block
+      # receives the 0-indexed worker number. Multiple blocks may be
+      # registered; they run in registration order.
+      def parallelize_teardown(&block)
+        @parallelize_teardown_hooks << block
+      end
+
+      # @api private
+      # Called from the parent before forking workers.
+      def fire_parallelize_before_fork_hooks
+        @parallelize_before_fork_hooks.each(&:call)
+      end
+
+      # @api private
+      # Called by the Worker after fork, before entering its runloop.
+      def fire_parallelize_setup_hooks(worker_number)
+        @parallelize_setup_hooks.each { |h| h.call(worker_number) }
+      end
+
+      # @api private
+      # Called by the Worker on clean exit.
+      def fire_parallelize_teardown_hooks(worker_number)
+        @parallelize_teardown_hooks.each { |h| h.call(worker_number) }
       end
 
       # @private

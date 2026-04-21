@@ -279,6 +279,16 @@ module RSpec::Core
     describe ".invoke" do
       let(:runner) { RSpec::Core::Runner }
 
+      # `.invoke` sets @invoked to guard against re-entry after fork (see
+      # parallel worker autorun path). Isolate that class-level ivar so
+      # test ordering doesn't leave a prior .invoke short-circuiting the
+      # next one.
+      before do
+        @invoked_ivar = runner.instance_variable_get(:@invoked)
+        runner.instance_variable_set(:@invoked, nil)
+      end
+      after { runner.instance_variable_set(:@invoked, @invoked_ivar) }
+
       it "runs the specs via #run" do
         allow(runner).to receive(:exit)
         expect(runner).to receive(:run)

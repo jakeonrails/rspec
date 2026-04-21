@@ -143,6 +143,21 @@ module RSpec
     @world ||= RSpec::Core::World.new
   end
 
+  # The 0-indexed worker number when running inside a parallel worker
+  # process, or `nil` on the parent / in serial runs. Set by the
+  # parallel Worker before it runs its runloop, and readable from
+  # user `parallelize_setup` blocks or anywhere inside an example.
+  def self.parallel_worker_number
+    @parallel_worker_number
+  end
+
+  # @private
+  # Set by `Parallel::Worker` inside the forked child before dispatching
+  # groups; should not be called from user code.
+  def self.parallel_worker_number=(number)
+    @parallel_worker_number = number
+  end
+
   # Namespace for the rspec-core code.
   module Core
     autoload :ExampleStatusPersister, "rspec/core/example_status_persister"
