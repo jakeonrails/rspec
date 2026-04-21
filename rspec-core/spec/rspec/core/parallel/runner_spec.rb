@@ -10,7 +10,7 @@ module RSpec::Core::Parallel
     # Kept short (2 workers, 2 groups) so CI time stays manageable.
     #
     # Hook invocations that happen inside a worker are observed by
-    # having each worker append a line to a tmpfile. The master
+    # having each worker append a line to a tmpfile. The parent
     # reads the file after the pool returns.
 
     let(:tmpdir)          { Dir.mktmpdir("rspec-parallel-runner") }
@@ -56,7 +56,7 @@ module RSpec::Core::Parallel
       group
     end
 
-    it "fires hooks in master/worker roles, dispatches across workers, and returns 0 on pass" do
+    it "fires hooks in parent/worker roles, dispatches across workers, and returns 0 on pass" do
       with_isolated_rspec_state do
         config = build_configuration
         world  = build_world(config)
@@ -69,7 +69,7 @@ module RSpec::Core::Parallel
         td_log = teardown_log
 
         config.parallelize_before_fork do
-          File.open(bf_log, "a") { |f| f.puts "master:#{Process.pid}" }
+          File.open(bf_log, "a") { |f| f.puts "parent:#{Process.pid}" }
         end
         config.parallelize_setup do |n|
           File.open(su_log, "a") { |f| f.puts "worker:#{n}:#{Process.pid}" }
@@ -146,7 +146,7 @@ module RSpec::Core::Parallel
       # for a fixed seed, each group's *within-group* example order is
       # reproducible. Catches regressions where a worker re-seeds after
       # fork or the ordering strategy is re-evaluated with fresh random
-      # state instead of inheriting the master's seed via COW.
+      # state instead of inheriting the parent's seed via COW.
       order_log_a = File.join(tmpdir, "order_a.log")
       order_log_b = File.join(tmpdir, "order_b.log")
 

@@ -3,7 +3,7 @@ RSpec::Support.require_rspec_core "parallel/serializer"
 module RSpec
   module Core
     module Parallel
-      # Master-side counterpart to ReporterListener. Given a wire event
+      # Parent-side counterpart to ReporterListener. Given a wire event
       # emitted by WorkerPool -- shape `[:event, event_name, worker_number,
       # [payload_kind, data]]` -- it reconstitutes a live `Notification`
       # and dispatches it to the reporter, so the existing formatter

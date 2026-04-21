@@ -7,7 +7,7 @@ Enhancements:
   `config.parallelize_before_fork` / `parallelize_setup` /
   `parallelize_teardown` hooks. Runs example groups across N fork-based
   worker processes; workers ship serialized notifications back to the
-  master so the existing formatter pipeline runs unchanged. Group-level
+  parent so the existing formatter pipeline runs unchanged. Group-level
   work units in this first pass. Available on platforms that support
   `Process.fork`. (Jake Moffatt)
 * Add `config.default_parallel_workers` so projects can opt into

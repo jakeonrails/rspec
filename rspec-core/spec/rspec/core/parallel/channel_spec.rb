@@ -2,32 +2,32 @@ require 'rspec/core/parallel/channel'
 
 module RSpec::Core::Parallel
   RSpec.describe Channel do
-    it "round-trips a message from master to worker to master within one process" do
+    it "round-trips a message from parent to worker to parent within one process" do
       channel = Channel.new
       channel.send_to_worker({ :work => :a })
-      expect(channel.receive_from_master).to eq({ :work => :a })
+      expect(channel.receive_from_parent).to eq({ :work => :a })
 
-      channel.send_to_master({ :result => :ok })
+      channel.send_to_parent({ :result => :ok })
       expect(channel.receive_from_worker).to eq({ :result => :ok })
     end
 
     it "supports binary data (Marshal output encoding)" do
       channel = Channel.new
-      channel.send_to_master("\xF8")
+      channel.send_to_parent("\xF8")
       expect(channel.receive_from_worker).to eq("\xF8")
     end
 
     context "across a real fork" do
       before { skip "fork not available on this platform" unless Process.respond_to?(:fork) }
 
-      it "delivers work from master to worker and events back" do
+      it "delivers work from parent to worker and events back" do
         channel = Channel.new
 
         pid = Process.fork do
-          channel.close_master_ends
-          work = channel.receive_from_master
-          channel.send_to_master([:event, :example_finished, work[:n], :payload])
-          channel.send_to_master([:group_finished, work[:key], :ok])
+          channel.close_parent_ends
+          work = channel.receive_from_parent
+          channel.send_to_parent([:event, :example_finished, work[:n], :payload])
+          channel.send_to_parent([:group_finished, work[:key], :ok])
           channel.close
           exit!(0)
         end
@@ -51,12 +51,12 @@ module RSpec::Core::Parallel
         channel = Channel.new
 
         pid = Process.fork do
-          channel.close_master_ends
-          received = channel.receive_from_master
-          channel.send_to_master([:got, received])
-          # receive again, expect EOF when master closes its down-pipe
-          eof = channel.receive_from_master
-          channel.send_to_master([:eof, eof.nil?])
+          channel.close_parent_ends
+          received = channel.receive_from_parent
+          channel.send_to_parent([:got, received])
+          # receive again, expect EOF when parent closes its down-pipe
+          eof = channel.receive_from_parent
+          channel.send_to_parent([:eof, eof.nil?])
           channel.close
           exit!(0)
         end

@@ -20,13 +20,13 @@ module RSpec::Core::Parallel
 
         def run
           loop do
-            msg = @channel.receive_from_master
+            msg = @channel.receive_from_parent
             break if msg.nil?
             _, key = msg
-            @channel.send_to_master([:event, :example_finished, @worker_number, [:raw, { :key => key }]])
-            @channel.send_to_master([:group_finished, key, :ok])
+            @channel.send_to_parent([:event, :example_finished, @worker_number, [:raw, { :key => key }]])
+            @channel.send_to_parent([:group_finished, key, :ok])
           end
-          @channel.send_to_master([:worker_exit, @worker_number])
+          @channel.send_to_parent([:worker_exit, @worker_number])
           @channel.close
         end
       end)
@@ -97,10 +97,10 @@ module RSpec::Core::Parallel
 
             def run
               loop do
-                msg = @channel.receive_from_master
+                msg = @channel.receive_from_parent
                 break if msg.nil?
               end
-              @channel.send_to_master([:worker_exit, @worker_number])
+              @channel.send_to_parent([:worker_exit, @worker_number])
               @channel.close
             end
           end)
@@ -148,7 +148,7 @@ module RSpec::Core::Parallel
 
           def run
             loop do
-              msg = @channel.receive_from_master
+              msg = @channel.receive_from_parent
               break if msg.nil?
               _, key = msg
               if key == "CRASH_ME" && !File.exist?(ENV.fetch("RSPEC_CRASH_MARKER"))
@@ -157,9 +157,9 @@ module RSpec::Core::Parallel
                 # the pipe closes abruptly, simulating a segfault.
                 Kernel.exit!(0)
               end
-              @channel.send_to_master([:group_finished, key, :ok])
+              @channel.send_to_parent([:group_finished, key, :ok])
             end
-            @channel.send_to_master([:worker_exit, @worker_number])
+            @channel.send_to_parent([:worker_exit, @worker_number])
             @channel.close
           end
         end)
@@ -203,11 +203,11 @@ module RSpec::Core::Parallel
 
           # Crash on the very first dispatched key. Both workers will
           # crash -- leaving the rest of the queue undrained -- which is
-          # precisely the condition that used to hang the master.
+          # precisely the condition that used to hang the parent.
           def run
-            msg = @channel.receive_from_master
+            msg = @channel.receive_from_parent
             Kernel.exit!(0) unless msg.nil?
-            @channel.send_to_master([:worker_exit, @worker_number])
+            @channel.send_to_parent([:worker_exit, @worker_number])
             @channel.close
           end
         end)
@@ -246,7 +246,7 @@ module RSpec::Core::Parallel
 
     context "SIGINT handling" do
       # Worker shim that sleeps on each item, simulating slow work --
-      # ensures the master can interrupt mid-run without a race.
+      # ensures the parent can interrupt mid-run without a race.
       before do
         stub_const("RSpec::Core::Parallel::Worker", Class.new do
           def initialize(_runner, channel, worker_number)
@@ -256,19 +256,19 @@ module RSpec::Core::Parallel
 
           def run
             loop do
-              msg = @channel.receive_from_master
+              msg = @channel.receive_from_parent
               break if msg.nil?
               _, key = msg
               sleep 5
-              @channel.send_to_master([:group_finished, key, :ok])
+              @channel.send_to_parent([:group_finished, key, :ok])
             end
-            @channel.send_to_master([:worker_exit, @worker_number])
+            @channel.send_to_parent([:worker_exit, @worker_number])
             @channel.close
           end
         end)
       end
 
-      # Raise the master-side trap synchronously via a background thread
+      # Raise the parent-side trap synchronously via a background thread
       # that fires SIGINT once the pool is inside IO.select. Ruby delivers
       # the trap on the main thread -- the next select iteration sets
       # @aborting and the run loop breaks.

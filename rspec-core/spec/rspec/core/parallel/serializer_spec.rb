@@ -62,33 +62,33 @@ module RSpec::Core::Parallel
       end
     end
 
-    describe "rehydration of an exception class the master never sees" do
+    describe "rehydration of an exception class the parent never sees" do
       # Typical real-world shape: Rails app raises an app-defined exception
       # (e.g. `MyApp::PaymentError`) inside a worker, ships the serialized
-      # form to the master, and the master's process does not have the Rails
-      # app loaded. The master must still render the failure message without
+      # form to the parent, and the parent's process does not have the Rails
+      # app loaded. The parent must still render the failure message without
       # trying to reconstruct the original class.
-      it "round-trips through Marshal without requiring the class on the master" do
+      it "round-trips through Marshal without requiring the class on the parent" do
         worker_side = Class.new(StandardError) do
-          def self.name = "MyApp::ThisClassDoesNotExistOnTheMaster"
+          def self.name = "MyApp::ThisClassDoesNotExistOnTheParent"
         end
         raised = worker_side.new("payment gateway timeout").tap do |e|
           e.set_backtrace(["app/models/payment.rb:42:in `charge'"])
         end
 
         wire = Marshal.dump(Serializer.serialize_exception(raised))
-        # Simulate master: drop all reference to the worker-side class before
+        # Simulate parent: drop all reference to the worker-side class before
         # rehydrating. Marshal.load must succeed anyway.
         worker_side = nil # rubocop:disable Lint/UselessAssignment
         restored = Marshal.load(wire) # rubocop:disable Security/MarshalLoad
 
-        expect(restored.class_name).to eq("MyApp::ThisClassDoesNotExistOnTheMaster")
+        expect(restored.class_name).to eq("MyApp::ThisClassDoesNotExistOnTheParent")
         expect(restored.message).to eq("payment gateway timeout")
         expect(restored.backtrace).to eq(["app/models/payment.rb:42:in `charge'"])
-        expect(restored.class.name).to eq("MyApp::ThisClassDoesNotExistOnTheMaster")
+        expect(restored.class.name).to eq("MyApp::ThisClassDoesNotExistOnTheParent")
       end
 
-      it "preserves a cause chain whose classes are also absent from the master" do
+      it "preserves a cause chain whose classes are also absent from the parent" do
         inner_klass = Class.new(StandardError) do
           def self.name = "MyApp::InnerError"
         end

@@ -144,7 +144,7 @@ module RSpec
   end
 
   # The 0-indexed worker number when running inside a parallel worker
-  # process, or `nil` on the master / in serial runs. Set by the
+  # process, or `nil` on the parent / in serial runs. Set by the
   # parallel Worker before it runs its runloop, and readable from
   # user `parallelize_setup` blocks or anywhere inside an example.
   def self.parallel_worker_number

@@ -4,7 +4,7 @@ RSpec::Support.require_rspec_core "parallel/worker"
 module RSpec
   module Core
     module Parallel
-      # Master-side pool that forks N workers, dispatches work units on
+      # Parent-side pool that forks N workers, dispatches work units on
       # demand, and yields each event arriving from any worker to the
       # caller's block. The caller (typically a Rehydrator + reporter
       # driver) decides what to do with events -- this class is pure
@@ -19,7 +19,7 @@ module RSpec
       #      won't mark us writable, and we keep draining readable pipes
       #      instead. No deadlock.
       #
-      #   2. Signal handling: SIGINT / SIGTERM to master marks the pool
+      #   2. Signal handling: SIGINT / SIGTERM to parent marks the pool
       #      aborting, then TERMs every live worker, waits up to
       #      KILL_TIMEOUT per worker, and KILLs stragglers. Pipes closed
       #      after each worker reaps. No orphans.
@@ -120,9 +120,9 @@ module RSpec
           @worker_count.times do |n|
             channel = Channel.new
             pid = Process.fork do
-              # fork-child code; SimpleCov runs in the master process only.
+              # fork-child code; SimpleCov runs in the parent process only.
               # :nocov:
-              channel.close_master_ends
+              channel.close_parent_ends
               Worker.new(@runner, channel, n).run
               # Kernel#exit (not exit!) so third-party at_exit hooks fire --
               # e.g. Capybara's Selenium driver cleanup. Runner.invoke is
@@ -213,8 +213,8 @@ module RSpec
         end
 
         def shutdown_workers(&block)
-          # Signal "no more work" by closing master's down-write end. Each
-          # worker's receive_from_master returns nil and they exit their
+          # Signal "no more work" by closing parent's down-write end. Each
+          # worker's receive_from_parent returns nil and they exit their
           # runloop, sending :worker_exit before closing.
           @workers.each do |w|
             next if w.exited?

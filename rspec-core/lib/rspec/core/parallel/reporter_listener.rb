@@ -5,8 +5,8 @@ module RSpec
     module Parallel
       # Worker-side reporter listener. Registered against every event in
       # `Reporter::RSPEC_NOTIFICATIONS`; each callback serializes the
-      # notification and ships it to the master over the Channel. Workers
-      # never drive the formatter chain themselves -- the master does that
+      # notification and ships it to the parent over the Channel. Workers
+      # never drive the formatter chain themselves -- the parent does that
       # once, after rehydrating events from every worker in global order.
       #
       # @private
@@ -21,7 +21,7 @@ module RSpec
         # produced for that event.
         Reporter::RSPEC_NOTIFICATIONS.each do |event|
           define_method(event) do |notification|
-            @channel.send_to_master([
+            @channel.send_to_parent([
               :event, event, @worker_number,
               Serializer.serialize_notification(event, notification)
             ])
@@ -34,8 +34,8 @@ module RSpec
         #
         # Workers must NOT also run the user's configured formatters
         # (progress, documentation, etc.): their file descriptors are
-        # inherited from the master, so each worker's formatter would
-        # write dots/docs to the same stdout the master is writing to,
+        # inherited from the parent, so each worker's formatter would
+        # write dots/docs to the same stdout the parent is writing to,
         # duplicating output. We force Reporter's `@setup` flag after
         # registering, which short-circuits `ensure_listeners_ready` and
         # prevents the default formatter from being lazily added on the

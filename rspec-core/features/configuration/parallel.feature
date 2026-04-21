@@ -6,7 +6,7 @@ Feature: Parallel execution configuration
   * `config.default_parallel_workers` sets the worker count when `--parallel`
     is passed with no argument (and when no explicit `--parallel=N` is
     given). Accepts an integer or the symbol `:number_of_processors`.
-  * `config.parallelize_before_fork` registers a master-side hook that
+  * `config.parallelize_before_fork` registers a parent-side hook that
     fires once, after `before(:suite)`, before any worker is forked.
   * `config.parallelize_setup` registers a worker-side hook that fires
     once per worker, immediately after the fork.
@@ -18,7 +18,7 @@ Feature: Parallel execution configuration
     with fresh timings.
 
   `RSpec.parallel_worker_number` is available inside workers (zero-based)
-  and is `nil` on the master.
+  and is `nil` on the parent.
 
   Parallel execution requires a platform that supports `Process.fork`.
 
@@ -62,7 +62,7 @@ Feature: Parallel execution configuration
       """ruby
       RSpec.configure do |c|
         c.parallelize_before_fork do
-          File.open("hooks.log", "a") { |f| f.puts "before_fork:master" }
+          File.open("hooks.log", "a") { |f| f.puts "before_fork:parent" }
         end
 
         c.parallelize_setup do |worker_number|
@@ -86,7 +86,7 @@ Feature: Parallel execution configuration
       """
     When I run `rspec --parallel=2 spec/example_spec.rb`
     Then the output should contain "2 examples, 0 failures"
-    And the file "hooks.log" should contain "before_fork:master"
+    And the file "hooks.log" should contain "before_fork:parent"
     And the file "hooks.log" should contain "setup:0"
     And the file "hooks.log" should contain "setup:1"
     And the file "hooks.log" should contain "teardown:0"

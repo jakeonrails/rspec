@@ -5,25 +5,25 @@ RSpec::Support.require_rspec_core "parallel/worker_pool"
 module RSpec
   module Core
     # Namespace for rspec-core's fork-based parallel runner implementation.
-    # See `Parallel::Runner` for the master-side entry point and
+    # See `Parallel::Runner` for the parent-side entry point and
     # `Parallel::Worker` for the forked-child loop.
     # @private
     module Parallel
-      # Master-side entry point. Stands in for Runner#run_specs when
+      # Parent-side entry point. Stands in for Runner#run_specs when
       # parallel execution is requested. Composition:
       #
-      #     before(:suite) hooks        (master, once)
-      #       parallelize_before_fork   (master, once, after suite setup)
+      #     before(:suite) hooks        (parent, once)
+      #       parallelize_before_fork   (parent, once, after suite setup)
       #         fork N workers
       #           parallelize_setup     (worker, once after fork)
       #             examples
       #           parallelize_teardown  (worker, once before exit)
       #         join
-      #     after(:suite) hooks         (master, once)
+      #     after(:suite) hooks         (parent, once)
       #
       # Events flow: worker emits via ReporterListener on its fresh
       # reporter -> WorkerPool yields to us -> Rehydrator dispatches to
-      # the master reporter -> master formatters fire unchanged.
+      # the parent reporter -> parent formatters fire unchanged.
       #
       # If `configuration.parallel_runtime_log_path` is set, the queue
       # is LPT-sorted against the prior log before dispatch, and the

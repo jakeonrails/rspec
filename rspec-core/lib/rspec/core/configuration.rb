@@ -1959,7 +1959,7 @@ module RSpec
         super(scope, *meta, &block)
       end
 
-      # Registers `block` to be run on the master process once, before any
+      # Registers `block` to be run on the parent process once, before any
       # worker is forked. Use for setup that's cheap and safe to inherit
       # via copy-on-write (loading gems, connecting to a template DB).
       # Multiple blocks may be registered; they run in registration order.
@@ -1999,7 +1999,7 @@ module RSpec
       end
 
       # @api private
-      # Called from the master before forking workers.
+      # Called from the parent before forking workers.
       def fire_parallelize_before_fork_hooks
         @parallelize_before_fork_hooks.each(&:call)
       end

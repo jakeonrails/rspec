@@ -1,10 +1,10 @@
 module RSpec
   module Core
     module Parallel
-      # Data transfer objects shipped from a worker to the master in place of
+      # Data transfer objects shipped from a worker to the parent in place of
       # the live `Example`, `ExampleGroup`, `ExecutionResult`, and `Exception`
       # objects. They hold only the surface that core's built-in formatters
-      # read from those objects -- reconstructed on the master so the existing
+      # read from those objects -- reconstructed on the parent so the existing
       # formatter pipeline runs unchanged.
       #
       # Any symmetric `Example`-alike behavior should live here rather than
@@ -61,7 +61,7 @@ module RSpec
           end
 
           # Reporter#example_group_started/finished skip the notify when
-          # this is empty (filtered-out groups). On the master side the
+          # this is empty (filtered-out groups). On the parent side the
           # worker has already selected which groups to run, so always
           # return a non-empty sentinel to let notifications through.
           def descendant_filtered_examples
@@ -122,7 +122,7 @@ module RSpec
 
         class << self
           # Dispatcher used by ReporterListener. Returns a value that can be
-          # Marshal'd and later fed back to the master's reconstitute step.
+          # Marshal'd and later fed back to the parent's reconstitute step.
           # Shape: [payload_kind, data]
           def serialize_notification(event, notification)
             if EXAMPLE_EVENTS.include?(event)

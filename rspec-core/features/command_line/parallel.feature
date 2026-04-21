@@ -5,9 +5,9 @@ Feature: `--parallel` option
   available CPU (`Etc.nprocessors`).
 
   Each worker loads your spec files pre-fork, so startup is paid once. The
-  master runs `before(:suite)` and `after(:suite)` hooks once, straddling the
+  parent runs `before(:suite)` and `after(:suite)` hooks once, straddling the
   pool. Workers run example groups pulled from a shared queue and ship
-  serialized notifications back to the master, which drives the usual
+  serialized notifications back to the parent, which drives the usual
   formatter pipeline.
 
   Parallel execution requires a platform that supports `Process.fork`. On
@@ -48,7 +48,7 @@ Feature: `--parallel` option
     Then the output should contain "8 examples, 0 failures"
     And the exit status should be 0
 
-  Scenario: A failing example in any group surfaces in the master's output
+  Scenario: A failing example in any group surfaces in the parent's output
     Given a file named "spec/failing_spec.rb" with:
       """ruby
       RSpec.describe "passing group" do

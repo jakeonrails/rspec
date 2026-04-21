@@ -8,7 +8,7 @@ module RSpec::Core::Parallel
         attr_reader :sent
 
         def initialize = @sent = []
-        def send_to_master(msg) = @sent.push(msg)
+        def send_to_parent(msg) = @sent.push(msg)
       end.new
     end
 
