@@ -92,6 +92,16 @@ module RSpec
             end
 
             break if @aborting
+
+            # Fail-fast: if every worker has exited but work remains
+            # (all workers crashed, or all exited before draining the
+            # queue), further selects are all-empty and loop forever.
+            # Surface a synthetic :worker_crashed per remaining key so
+            # the reporter registers them as failures, then bail out.
+            if remaining.any? && @workers.all?(&:exited?)
+              drain_remaining_as_crashed(remaining, &block)
+              break
+            end
           end
 
           shutdown_workers(&block)
@@ -162,6 +172,21 @@ module RSpec
           worker.current_key = nil
           remaining.unshift(crashed_key)
           block.call([:worker_crashed, worker.number, crashed_key]) if block
+        end
+
+        # Called when we detect that every worker is :exited but the
+        # queue still has keys. Each remaining key is surfaced as a
+        # :worker_crashed event (worker_number nil -- no live worker
+        # to attribute it to) so the caller's reporter can mark those
+        # groups as failures. Without this, Runner#drive_pool's
+        # `queue.all? { |k| statuses[k] == :ok }` would just return
+        # false silently and the user wouldn't see which groups never
+        # ran.
+        def drain_remaining_as_crashed(remaining, &block)
+          return unless block
+          remaining.shift(remaining.size).each do |key|
+            block.call([:worker_crashed, nil, key])
+          end
         end
 
         def done?(remaining)

@@ -182,6 +182,69 @@ module RSpec::Core::Parallel
       end
     end
 
+    context "all workers exit with work still queued" do
+      # Regression: if every worker crashes (or otherwise exits) while
+      # remaining.any?, the run loop used to spin forever on empty
+      # IO.selects -- no readable fds, no writable fds, `done?` never
+      # true. Now we detect that condition, emit a synthetic
+      # :worker_crashed per remaining key, and break.
+      it "emits :worker_crashed for every remaining key and returns within bounded time" do
+        require 'tmpdir'
+        dir = Dir.mktmpdir("rspec-all-crash")
+        ENV["RSPEC_ALL_CRASH_DIR"] = dir
+
+        stub_const("RSpec::Core::Parallel::Worker", Class.new do
+          def initialize(_runner, channel, worker_number)
+            @channel = channel
+            @worker_number = worker_number
+          end
+
+          # Crash on the very first dispatched key. Both workers will
+          # crash -- leaving the rest of the queue undrained -- which is
+          # precisely the condition that used to hang the master.
+          def run
+            loop do
+              msg = @channel.receive_from_master
+              break if msg.nil?
+              Kernel.exit!(0)
+            end
+            @channel.send_to_master([:worker_exit, @worker_number])
+            @channel.close
+          end
+        end)
+
+        pool  = described_class.new(runner, 2)
+        queue = Array.new(5) { |i| "spec/q_#{i}_spec.rb:1" }
+        events = []
+
+        begin
+          start = Time.now
+          pool.run(queue) { |msg| events << msg }
+          duration = Time.now - start
+
+          # Contract: the run loop exits rather than spinning forever.
+          # Without the fail-fast guard, duration would be unbounded.
+          expect(duration).to be < 10
+
+          # Every queued key surfaces at least one :worker_crashed event
+          # so the caller can count it as "didn't complete." Keys that
+          # were dispatched then crashed may surface twice (once from
+          # the mid-group-crash requeue path, once from the fail-fast
+          # drain); that's harmless over-notification, so we assert
+          # coverage rather than equality.
+          crashed_keys = events.select { |e| e.first == :worker_crashed }.map { |e| e[2] }.uniq
+          expect(crashed_keys).to match_array(queue)
+
+          # Nothing completed successfully -- no :group_finished for any key.
+          finished_keys = events.select { |e| e.first == :group_finished }.map { |e| e[1] }
+          expect(finished_keys).to be_empty
+        ensure
+          ENV.delete("RSPEC_ALL_CRASH_DIR")
+          FileUtils.remove_entry(dir) if File.directory?(dir)
+        end
+      end
+    end
+
     context "SIGINT handling" do
       # Worker shim that sleeps on each item, simulating slow work --
       # ensures the master can interrupt mid-run without a race.
