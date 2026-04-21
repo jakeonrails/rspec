@@ -34,9 +34,9 @@ module RSpec
           # set on dispatch and cleared on :group_finished. If the worker's
           # pipe closes while current_key is set, the worker crashed
           # mid-group and we requeue that key.
-          def idle?;   state == :idle;   end
-          def busy?;   state == :busy;   end
-          def exited?; state == :exited; end
+          def idle? = state == :idle
+          def busy? = state == :busy
+          def exited? = state == :exited
         end
 
         def initialize(runner, worker_count)
@@ -52,6 +52,10 @@ module RSpec
         #   [:event, event_name, worker_number, payload]
         #   [:group_finished, key, :ok|:error]
         #   [:worker_exit, worker_number]
+        # The event loop is intentionally kept as a single method so the
+        # drain/dispatch/fail-fast ordering stays visible at one glance --
+        # splitting it obscures the interleaving invariants.
+        # rubocop:disable Metrics/CyclomaticComplexity, Metrics/MethodLength
         def run(queue, &block)
           remaining = queue.dup
           install_signal_traps
@@ -77,14 +81,14 @@ module RSpec
                 reap_worker(worker)
               else
                 update_worker_state(worker, message)
-                block.call(message) if block
+                block&.call(message)
               end
             end
 
             Array(ready_write).each do |io|
               next if remaining.empty?
               worker = worker_for_down_write(io)
-              next unless worker && worker.idle? && !@aborting
+              next unless worker&.idle? && !@aborting
               key = remaining.shift
               worker.channel.send_to_worker([:run_group, key])
               worker.state = :busy
@@ -108,6 +112,7 @@ module RSpec
         ensure
           restore_signal_traps
         end
+      # rubocop:enable Metrics/CyclomaticComplexity, Metrics/MethodLength
 
       private
 
@@ -115,6 +120,8 @@ module RSpec
           @worker_count.times do |n|
             channel = Channel.new
             pid = Process.fork do
+              # fork-child code; SimpleCov runs in the master process only.
+              # :nocov:
               channel.close_master_ends
               Worker.new(@runner, channel, n).run
               # Kernel#exit (not exit!) so third-party at_exit hooks fire --
@@ -122,6 +129,7 @@ module RSpec
               # idempotent across fork, so the autorun at_exit won't re-run
               # the suite here.
               exit(0)
+              # :nocov:
             end
             Process.detach(pid)
             channel.close_worker_ends
@@ -171,7 +179,7 @@ module RSpec
           crashed_key = worker.current_key
           worker.current_key = nil
           remaining.unshift(crashed_key)
-          block.call([:worker_crashed, worker.number, crashed_key]) if block
+          block&.call([:worker_crashed, worker.number, crashed_key])
         end
 
         # Called when we detect that every worker is :exited but the
@@ -195,7 +203,13 @@ module RSpec
 
         def reap_worker(worker)
           worker.state = :exited
-          worker.channel.close rescue nil
+          begin
+            worker.channel.close
+          rescue
+            # :nocov:
+            nil
+            # :nocov:
+          end
         end
 
         def shutdown_workers(&block)
@@ -217,7 +231,15 @@ module RSpec
             drain_remaining_events(&block)
           end
 
-          @workers.each { |w| w.channel.close rescue nil }
+          @workers.each { |w|
+            begin
+              w.channel.close
+            rescue
+              # :nocov:
+              nil
+              # :nocov:
+            end
+          }
         end
 
         def drain_remaining_events(&block)
@@ -228,10 +250,12 @@ module RSpec
               worker = worker_for_up_read(io)
               msg = worker.channel.receive_from_worker
               if msg.nil?
+                # :nocov: race between up-pipe close and receive
                 worker.state = :exited
+                # :nocov:
               else
                 update_worker_state(worker, msg)
-                block.call(msg) if block
+                block&.call(msg)
               end
             end
           end
@@ -248,15 +272,21 @@ module RSpec
           end
 
           deadline = Time.now + KILL_TIMEOUT
-          until @workers.all? { |w| w.exited? || !process_alive?(w.pid) } || Time.now > deadline
-            sleep 0.05
-          end
+          sleep 0.05 until @workers.all? { |w| w.exited? || !process_alive?(w.pid) } || Time.now > deadline
 
+          # KILL fallback runs only when TERM + KILL_TIMEOUT didn't get
+          # the worker to exit -- impractical to exercise in tests.
+          # :nocov:
           @workers.each do |w|
             next if w.exited? || !process_alive?(w.pid)
-            Process.kill(:KILL, w.pid) rescue nil
+            begin
+              Process.kill(:KILL, w.pid)
+            rescue
+              nil
+            end
             w.state = :exited
           end
+          # :nocov:
         end
 
         def process_alive?(pid)

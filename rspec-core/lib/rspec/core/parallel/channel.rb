@@ -39,10 +39,13 @@ module RSpec
         end
 
         # Mirror of `close_worker_ends`, called inside the forked worker.
+        # Runs in fork child only.
+        # :nocov:
         def close_master_ends
           @down_write.close
           @up_read.close
         end
+        # :nocov:
 
         # Master -> worker. Safe to call after `close_worker_ends`.
         def send_to_worker(message)

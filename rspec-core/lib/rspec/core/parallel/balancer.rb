@@ -57,7 +57,7 @@ module RSpec
           tmp = "#{path}.#{Process.pid}.tmp"
           File.open(tmp, "w") do |f|
             timings.sort_by { |k, _| k }.each do |key, seconds|
-              f.puts "#{key}\t#{format('%.3f', seconds)}"
+              f.puts "#{key}\t#{'%.3f' % seconds}"
             end
           end
           File.rename(tmp, path)

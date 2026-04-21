@@ -22,7 +22,7 @@ module RSpec::Core::Parallel
       Serializer::SerializedExample.new(
         "./a_spec.rb[1:1]", "does a thing", "A does a thing",
         "./a_spec.rb:1", "./a_spec.rb:1",
-        {:file_path => "./a_spec.rb"}, exec,
+        { :file_path => "./a_spec.rb" }, exec,
         Serializer::SerializedGroup.new("A", 1, {}, "A")
       )
     end
@@ -84,6 +84,24 @@ module RSpec::Core::Parallel
       raw = RSpec::Core::Notifications::MessageNotification.new("hi")
       rehydrator.handle([:event, :message, 0, [:raw, raw]])
       expect(reporter).to have_received(:notify).with(:message, raw)
+    end
+
+    it "wraps an :example payload in an ExampleNotification for non-routed events" do
+      ex = double("example")
+      rehydrator.handle([:event, :example_custom, 0, [:example, ex]])
+      expect(reporter).to have_received(:notify) do |event_name, notification|
+        expect(event_name).to eq(:example_custom)
+        expect(notification).to be_a(RSpec::Core::Notifications::ExampleNotification)
+      end
+    end
+
+    it "wraps a :group payload in a GroupNotification for non-routed events" do
+      group = double("group")
+      rehydrator.handle([:event, :group_custom, 0, [:group, group]])
+      expect(reporter).to have_received(:notify) do |event_name, notification|
+        expect(event_name).to eq(:group_custom)
+        expect(notification).to be_a(RSpec::Core::Notifications::GroupNotification)
+      end
     end
 
     it "raises on an unknown payload kind" do

@@ -2,7 +2,9 @@ require 'tmpdir'
 require 'rspec/core/parallel/runner'
 
 module RSpec::Core::Parallel
-  RSpec.describe Runner, :if => Process.respond_to?(:fork) do
+  RSpec.describe Runner do
+    before { skip "fork not available on this platform" unless Process.respond_to?(:fork) }
+
     # These tests drive the real fork pipeline end-to-end: forks
     # workers, runs groups, ships events back, reaps cleanly.
     # Kept short (2 workers, 2 groups) so CI time stays manageable.
@@ -62,7 +64,9 @@ module RSpec::Core::Parallel
         RSpec.instance_variable_set(:@configuration, config)
         RSpec.instance_variable_set(:@world, world)
 
-        bf_log = before_fork_log; su_log = setup_log; td_log = teardown_log
+        bf_log = before_fork_log
+        su_log = setup_log
+        td_log = teardown_log
 
         config.parallelize_before_fork do
           File.open(bf_log, "a") { |f| f.puts "master:#{Process.pid}" }
@@ -121,6 +125,19 @@ module RSpec::Core::Parallel
 
         runner = described_class.new(config, world, 2)
         expect(runner.run_specs([])).to eq(0)
+      end
+    end
+
+    it "returns failure_exit_code on an empty run when fail_if_no_examples is set" do
+      with_isolated_rspec_state do
+        config = build_configuration
+        world  = build_world(config)
+        RSpec.instance_variable_set(:@configuration, config)
+        RSpec.instance_variable_set(:@world, world)
+        config.fail_if_no_examples = true
+
+        runner = described_class.new(config, world, 2)
+        expect(runner.run_specs([])).to eq(config.failure_exit_code)
       end
     end
 

@@ -69,19 +69,24 @@ module RSpec
           end
         end
 
+        # `Struct`'s default to_s would render `#<struct ClassStub name="X">`
+        # anywhere the presenter interpolates `"#{exception.class}"` (see
+        # ExceptionPresenter#exception_class_name). Mask the Struct form.
+        # Defined outside SerializedException so the constant is scoped to
+        # the module (rubocop: Lint/ConstantDefinitionInBlock).
+        ClassStub = Struct.new(:name) do
+          # @return [String] the class name.
+          def to_s
+            name.to_s
+          end
+          alias_method :inspect, :to_s
+        end
+
         SerializedException = Struct.new(:class_name, :message, :backtrace, :cause) do
           # Duck-type as `Exception` for `ExceptionPresenter`, which reads
           # `.message`, `.backtrace`, `.class.name`, `.cause`.
           def class
             ClassStub.new(class_name)
-          end
-
-          # `Struct`'s default to_s would render `#<struct ClassStub name="X">`
-          # anywhere the presenter interpolates `"#{exception.class}"` (see
-          # ExceptionPresenter#exception_class_name). Mask the Struct form.
-          ClassStub = Struct.new(:name) do
-            def to_s; name.to_s; end
-            alias_method :inspect, :to_s
           end
         end
 
@@ -92,10 +97,17 @@ module RSpec
           # Expose the same `#file_path`, `#pending`, `#skip` delegate surface
           # that `Example#delegate_to_metadata` provides, so formatters that
           # hit those methods don't branch on real-vs-serialized.
-          def file_path;            metadata[:file_path];            end
-          def pending;              metadata[:pending];              end
-          def skip;                 metadata[:skip];                 end
-          def exception;            execution_result && execution_result.exception; end
+          # @return [String, nil] the spec file path.
+          def file_path = metadata.[](:file_path)
+
+          # @return [Object, nil] pending metadata value (String message, true, or nil).
+          def pending = metadata.[](:pending)
+
+          # @return [Object, nil] skip metadata value (String message, true, or nil).
+          def skip = metadata.[](:skip)
+
+          # @return [SerializedException, nil] the serialized failure exception, if any.
+          def exception = execution_result&.exception
         end
 
         # Events that require per-type payload projection. Anything not

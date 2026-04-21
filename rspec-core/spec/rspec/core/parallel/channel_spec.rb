@@ -17,7 +17,9 @@ module RSpec::Core::Parallel
       expect(channel.receive_from_worker).to eq("\xF8")
     end
 
-    context "across a real fork", :if => Process.respond_to?(:fork) do
+    context "across a real fork" do
+      before { skip "fork not available on this platform" unless Process.respond_to?(:fork) }
+
       it "delivers work from master to worker and events back" do
         channel = Channel.new
 

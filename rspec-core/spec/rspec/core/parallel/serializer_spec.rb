@@ -57,7 +57,7 @@ module RSpec::Core::Parallel
         # ExceptionPresenter does `"#{exception.class}"` in some code paths;
         # Struct's default to_s would surface `#<struct ClassStub name="X">`.
         serialized = Serializer.serialize_exception(RuntimeError.new("x"))
-        expect("#{serialized.class}").to eq("RuntimeError")
+        expect(serialized.class.to_s).to eq("RuntimeError")
         expect(serialized.class.inspect).to eq("RuntimeError")
       end
     end
@@ -70,7 +70,7 @@ module RSpec::Core::Parallel
       # trying to reconstruct the original class.
       it "round-trips through Marshal without requiring the class on the master" do
         worker_side = Class.new(StandardError) do
-          def self.name; "MyApp::ThisClassDoesNotExistOnTheMaster"; end
+          def self.name = "MyApp::ThisClassDoesNotExistOnTheMaster"
         end
         raised = worker_side.new("payment gateway timeout").tap do |e|
           e.set_backtrace(["app/models/payment.rb:42:in `charge'"])
@@ -80,7 +80,7 @@ module RSpec::Core::Parallel
         # Simulate master: drop all reference to the worker-side class before
         # rehydrating. Marshal.load must succeed anyway.
         worker_side = nil # rubocop:disable Lint/UselessAssignment
-        restored = Marshal.load(wire)
+        restored = Marshal.load(wire) # rubocop:disable Security/MarshalLoad
 
         expect(restored.class_name).to eq("MyApp::ThisClassDoesNotExistOnTheMaster")
         expect(restored.message).to eq("payment gateway timeout")
@@ -90,17 +90,17 @@ module RSpec::Core::Parallel
 
       it "preserves a cause chain whose classes are also absent from the master" do
         inner_klass = Class.new(StandardError) do
-          def self.name; "MyApp::InnerError"; end
+          def self.name = "MyApp::InnerError"
         end
         outer_klass = Class.new(StandardError) do
-          def self.name; "MyApp::OuterError"; end
+          def self.name = "MyApp::OuterError"
         end
         inner = inner_klass.new("inner")
         outer = outer_klass.new("outer")
         outer.define_singleton_method(:cause) { inner }
 
         wire = Marshal.dump(Serializer.serialize_exception(outer))
-        restored = Marshal.load(wire)
+        restored = Marshal.load(wire) # rubocop:disable Security/MarshalLoad
 
         expect(restored.class_name).to eq("MyApp::OuterError")
         expect(restored.cause.class_name).to eq("MyApp::InnerError")

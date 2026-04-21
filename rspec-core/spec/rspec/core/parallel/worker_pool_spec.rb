@@ -1,7 +1,9 @@
 require 'rspec/core/parallel/worker_pool'
 
 module RSpec::Core::Parallel
-  RSpec.describe WorkerPool, :if => Process.respond_to?(:fork) do
+  RSpec.describe WorkerPool do
+    before { skip "fork not available on this platform" unless Process.respond_to?(:fork) }
+
     # Minimal runner double: the pool only needs #configuration, #world.
     # Our test workers don't call .run_specs -- they're replaced by a
     # test-only Worker substitute that echoes work back as events.
@@ -203,11 +205,8 @@ module RSpec::Core::Parallel
           # crash -- leaving the rest of the queue undrained -- which is
           # precisely the condition that used to hang the master.
           def run
-            loop do
-              msg = @channel.receive_from_master
-              break if msg.nil?
-              Kernel.exit!(0)
-            end
+            msg = @channel.receive_from_master
+            Kernel.exit!(0) unless msg.nil?
             @channel.send_to_master([:worker_exit, @worker_number])
             @channel.close
           end
@@ -305,10 +304,11 @@ module RSpec::Core::Parallel
         # All forked workers are reaped, no stragglers alive.
         pool.instance_variable_get(:@workers).each do |w|
           alive = begin
-                    Process.kill(0, w.pid); true
-                  rescue Errno::ESRCH, Errno::EPERM
-                    false
-                  end
+            Process.kill(0, w.pid)
+            true
+          rescue Errno::ESRCH, Errno::EPERM
+            false
+          end
           expect(alive).to be(false)
         end
       end
@@ -339,10 +339,11 @@ module RSpec::Core::Parallel
         # Workers are reaped cleanly.
         pool.instance_variable_get(:@workers).each do |w|
           alive = begin
-                    Process.kill(0, w.pid); true
-                  rescue Errno::ESRCH, Errno::EPERM
-                    false
-                  end
+            Process.kill(0, w.pid)
+            true
+          rescue Errno::ESRCH, Errno::EPERM
+            false
+          end
           expect(alive).to be(false)
         end
       end

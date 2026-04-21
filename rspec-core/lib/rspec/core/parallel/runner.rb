@@ -4,6 +4,10 @@ RSpec::Support.require_rspec_core "parallel/worker_pool"
 
 module RSpec
   module Core
+    # Namespace for rspec-core's fork-based parallel runner implementation.
+    # See `Parallel::Runner` for the master-side entry point and
+    # `Parallel::Worker` for the forked-child loop.
+    # @private
     module Parallel
       # Master-side entry point. Stands in for Runner#run_specs when
       # parallel execution is requested. Composition:

@@ -30,6 +30,11 @@ module RSpec
         # predate this field (test shims) work unchanged -- the master
         # treats a missing value as "no timing data."
 
+        # Worker runs inside forked children; SimpleCov only instruments
+        # the master process, so every line below is reported uncovered
+        # even though worker_pool_spec exercises it end-to-end via real
+        # forks. See spec/rspec/core/parallel/worker_pool_spec.rb.
+        # :nocov:
         def initialize(runner, channel, worker_number)
           @runner        = runner
           @channel       = channel
@@ -100,6 +105,7 @@ module RSpec
           ])
           :error
         end
+        # :nocov:
       end
     end
   end

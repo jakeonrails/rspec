@@ -6,8 +6,9 @@ module RSpec::Core::Parallel
     let(:fake_channel) do
       Class.new do
         attr_reader :sent
-        def initialize; @sent = []; end
-        def send_to_master(msg); @sent << msg; end
+
+        def initialize = @sent = []
+        def send_to_master(msg) = @sent <<(msg)
       end.new
     end
 

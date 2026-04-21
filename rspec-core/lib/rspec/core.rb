@@ -151,7 +151,9 @@ module RSpec
     @parallel_worker_number
   end
 
-  # @api private
+  # @private
+  # Set by `Parallel::Worker` inside the forked child before dispatching
+  # groups; should not be called from user code.
   def self.parallel_worker_number=(number)
     @parallel_worker_number = number
   end
