@@ -54,6 +54,19 @@ module RSpec::Core
       config.parallel_workers = 1
       expect(runner.parallel?).to be(false)
     end
+
+    it "#run_specs_in_parallel delegates to Parallel::Runner with the resolved worker count" do
+      RSpec::Support.require_rspec_core "parallel/runner"
+      config.parallel_workers = 3
+      example_groups = [:group_a, :group_b]
+      parallel_runner = instance_double(RSpec::Core::Parallel::Runner)
+
+      expect(RSpec::Core::Parallel::Runner).to receive(:new).
+        with(config, world, 3).and_return(parallel_runner)
+      expect(parallel_runner).to receive(:run_specs).with(example_groups).and_return(0)
+
+      expect(runner.run_specs_in_parallel(example_groups)).to eq(0)
+    end
   end
 
   RSpec.describe Runner, "default_parallel_workers fallback" do
