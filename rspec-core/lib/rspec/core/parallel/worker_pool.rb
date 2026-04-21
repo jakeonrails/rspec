@@ -122,6 +122,14 @@ module RSpec
             pid = Process.fork do
               # fork-child code; SimpleCov runs in the parent process only.
               # :nocov:
+              # Parent installed INT/TERM traps that only set `@aborting`
+              # in the parent's scope. Children inherit those traps via
+              # fork, which neuters SIGTERM in the worker -- the parent's
+              # force_terminate_workers path would then always wait the
+              # full KILL_TIMEOUT and fall through to SIGKILL. Reset to
+              # default so SIGTERM actually terminates the worker.
+              Signal.trap(:INT,  "DEFAULT")
+              Signal.trap(:TERM, "DEFAULT")
               channel.close_parent_ends
               Worker.new(@runner, channel, n).run
               # Kernel#exit (not exit!) so third-party at_exit hooks fire --
@@ -275,18 +283,30 @@ module RSpec
           sleep 0.05 until @workers.all? { |w| w.exited? || !process_alive?(w.pid) } || Time.now > deadline
 
           # KILL fallback runs only when TERM + KILL_TIMEOUT didn't get
-          # the worker to exit -- impractical to exercise in tests.
+          # the worker to exit -- now rare since worker spawn resets
+          # SIGTERM to DEFAULT, but kept as a safety net for workers
+          # stuck in uninterruptible kernel calls.
           # :nocov:
           @workers.each do |w|
             next if w.exited? || !process_alive?(w.pid)
             begin
               Process.kill(:KILL, w.pid)
-            rescue
+            rescue Errno::ESRCH
               nil
             end
-            w.state = :exited
           end
           # :nocov:
+
+          # After SIGKILL the kernel still has to tear the process down
+          # and Process.detach's waiter thread has to call waitpid before
+          # Process.kill(0, pid) stops returning 0 on the zombie. On a
+          # loaded runner this can take tens of ms -- returning before
+          # then would leave callers (and tests) seeing `alive=true` for
+          # pids we've already reported as :exited.
+          kill_deadline = Time.now + KILL_TIMEOUT
+          sleep 0.05 until @workers.all? { |w| !process_alive?(w.pid) } || Time.now > kill_deadline
+
+          @workers.each { |w| w.state = :exited }
         end
 
         def process_alive?(pid)
