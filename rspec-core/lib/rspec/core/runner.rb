@@ -136,16 +136,33 @@ module RSpec
 
       # @private
       def parallel?
-        @configuration.parallel_workers && @configuration.parallel_workers >= 2 &&
-          Process.respond_to?(:fork)
+        effective_parallel_workers >= 2 && Process.respond_to?(:fork)
       end
 
       # @private
       def run_specs_in_parallel(example_groups)
         RSpec::Support.require_rspec_core "parallel/runner"
         Parallel::Runner.new(
-          @configuration, @world, @configuration.parallel_workers
+          @configuration, @world, effective_parallel_workers
         ).run_specs(example_groups)
+      end
+
+      # @private
+      # Resolution order: explicit `parallel_workers` (set via --parallel
+      # on the CLI) takes precedence; otherwise fall back to
+      # `default_parallel_workers` if configured.
+      def effective_parallel_workers
+        explicit = @configuration.parallel_workers
+        return explicit unless explicit.nil?
+        case @configuration.default_parallel_workers
+        when :number_of_processors
+          require 'etc'
+          Etc.nprocessors
+        when Integer
+          @configuration.default_parallel_workers
+        else
+          0
+        end
       end
 
       # @private

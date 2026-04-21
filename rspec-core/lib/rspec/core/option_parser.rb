@@ -79,7 +79,7 @@ module RSpec::Core
                   '  If N is omitted, uses the number of available CPUs.') do |n|
           require 'etc'
           count = n || Etc.nprocessors
-          options[:parallel_workers] = count < 2 ? nil : count
+          options[:parallel_workers] = count
         end
 
         parser.on('--[no-]fail-fast[=COUNT]', 'Abort the run after a certain number of failures (1 by default).') do |argument|

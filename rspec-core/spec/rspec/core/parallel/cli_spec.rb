@@ -14,9 +14,9 @@ module RSpec::Core
       expect(opts[:parallel_workers]).to eq(Etc.nprocessors)
     end
 
-    it "disables parallel (nil) when N < 2" do
-      expect(Parser.parse(%w[--parallel=1])[:parallel_workers]).to be_nil
-      expect(Parser.parse(%w[--parallel=0])[:parallel_workers]).to be_nil
+    it "preserves explicit N < 2 so users can force serial over a configured default" do
+      expect(Parser.parse(%w[--parallel=1])[:parallel_workers]).to eq(1)
+      expect(Parser.parse(%w[--parallel=0])[:parallel_workers]).to eq(0)
     end
 
     it "applies to Configuration via ConfigurationOptions" do
@@ -52,6 +52,52 @@ module RSpec::Core
 
     it "reports parallel? = false when parallel_workers = 1" do
       config.parallel_workers = 1
+      expect(runner.parallel?).to be(false)
+    end
+  end
+
+  RSpec.describe Runner, "default_parallel_workers fallback" do
+    let(:config)  { Configuration.new }
+    let(:world)   { World.new(config) }
+    let(:options) { ConfigurationOptions.new([]) }
+    subject(:runner) { Runner.new(options, config, world) }
+
+    before do
+      allow(Process).to receive(:respond_to?).with(:fork).and_return(true)
+    end
+
+    it "falls back to default_parallel_workers when --parallel is absent" do
+      config.default_parallel_workers = 3
+      expect(runner.effective_parallel_workers).to eq(3)
+      expect(runner.parallel?).to be(true)
+    end
+
+    it "resolves :number_of_processors via Etc.nprocessors" do
+      require 'etc'
+      config.default_parallel_workers = :number_of_processors
+      expect(runner.effective_parallel_workers).to eq(Etc.nprocessors)
+    end
+
+    it "lets explicit parallel_workers win over the default" do
+      config.parallel_workers = 5
+      config.default_parallel_workers = :number_of_processors
+      expect(runner.effective_parallel_workers).to eq(5)
+    end
+
+    it "stays serial when neither is set" do
+      expect(runner.effective_parallel_workers).to eq(0)
+      expect(runner.parallel?).to be(false)
+    end
+
+    it "stays serial when the default is nil" do
+      config.default_parallel_workers = nil
+      expect(runner.parallel?).to be(false)
+    end
+
+    it "lets explicit --parallel=0 force serial over a configured default" do
+      config.default_parallel_workers = :number_of_processors
+      config.parallel_workers = 0
+      expect(runner.effective_parallel_workers).to eq(0)
       expect(runner.parallel?).to be(false)
     end
   end

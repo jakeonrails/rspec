@@ -10,6 +10,11 @@ Enhancements:
   master so the existing formatter pipeline runs unchanged. Group-level
   work units in this first pass. Available on platforms that support
   `Process.fork`. (Jake Moffatt)
+* Add `config.default_parallel_workers` so projects can opt into
+  parallel-by-default without requiring `--parallel` on every
+  invocation. Accepts an Integer or `:number_of_processors` (resolved
+  at run time via `Etc.nprocessors`). Explicit `--parallel[=N]` on the
+  CLI wins when provided. (Jake Moffatt)
 * Add `config.parallel_runtime_log_path` (default
   `./.rspec_parallel_runtime.log`). When set, `--parallel` records
   per-group wall-clock timings and reuses them on the next run to

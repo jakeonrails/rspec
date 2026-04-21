@@ -138,6 +138,17 @@ module RSpec
       add_setting :parallel_workers
 
       # @macro add_setting
+      # Fallback worker count used when `--parallel` is not passed on
+      # the CLI. Accepts an Integer, the symbol `:number_of_processors`
+      # (resolved at run time via `Etc.nprocessors`), or `nil` (default,
+      # serial). This is the knob for running parallel by default in a
+      # project's `spec_helper.rb` / `rails_helper.rb` without forcing
+      # every invocation to pass `--parallel`.
+      # Precedence: `--parallel[=N]` on the CLI wins when provided.
+      # @return [Integer, Symbol, nil]
+      add_setting :default_parallel_workers
+
+      # @macro add_setting
       # Path to the runtime log used by the parallel queue balancer.
       # When present, groups are dispatched slowest-first so a single
       # long-running group doesn't become the critical-path tail of
