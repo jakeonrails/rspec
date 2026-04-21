@@ -281,6 +281,72 @@ You can store command line options in a `.rspec` file in the project's root
 directory, and the `rspec` command will read them as though you typed them on
 the command line.
 
+## Parallel Execution
+
+Run example groups across multiple fork-based worker processes with
+`--parallel[=N]`:
+
+```
+rspec --parallel=4      # 4 workers
+rspec --parallel        # one worker per CPU (Etc.nprocessors)
+```
+
+Each worker loads your spec files pre-fork, so startup is paid once. The
+parent runs `before(:suite)` and `after(:suite)` hooks once, straddling the
+pool. Workers run example groups pulled from a shared queue and ship
+serialized notifications back to the parent, which drives the usual
+formatter pipeline.
+
+To prepare per-process resources (such as a new database connection),
+register fork lifecycle hooks:
+
+```ruby
+RSpec.configure do |config|
+  config.parallelize_before_fork do
+    # parent-side, once, after before(:suite), before any worker is forked
+  end
+
+  config.parallelize_setup do |worker_number|
+    # worker-side, once per worker, after the fork
+  end
+
+  config.parallelize_teardown do |worker_number|
+    # worker-side, once per worker, before the worker exits
+  end
+end
+```
+
+`RSpec.parallel_worker_number` is available inside the worker and is `nil`
+on the parent. Parallel execution requires a platform that supports
+`Process.fork`; otherwise `--parallel` is a no-op and specs run serially.
+
+To enable parallel runs without passing `--parallel` every time, set
+`config.default_parallel_workers`. An explicit `--parallel=N` on the
+command line always wins, and `--parallel` with no argument falls back to
+this default:
+
+```ruby
+RSpec.configure do |config|
+  config.default_parallel_workers = :number_of_processors
+  # or a fixed integer:
+  # config.default_parallel_workers = 4
+end
+```
+
+For long suites with uneven group runtimes, set
+`config.parallel_runtime_log_path` to a file path. RSpec will record
+per-group timings and, on the next run, dispatch the longest-running
+groups first so workers finish closer together:
+
+```ruby
+RSpec.configure do |config|
+  config.parallel_runtime_log_path = "tmp/parallel_runtime.log"
+end
+```
+
+The file format is one `group_id<TAB>seconds` entry per line, human-readable
+and safe to commit or cache between CI runs.
+
 ## Get Started
 
 Start with a simple example of behavior you expect from your system. Do
