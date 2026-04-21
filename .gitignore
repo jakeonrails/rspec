@@ -25,3 +25,9 @@ Gemfile.lock
 **/rerun.txt
 **/spec/examples.txt
 **/tmp
+
+# Parallel runner persistent log (written per-run, not source)
+**/.rspec_parallel_runtime.log
+
+# Local assistant/session state
+.claude/

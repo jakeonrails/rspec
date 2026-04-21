@@ -320,6 +320,33 @@ end
 on the master. Parallel execution requires a platform that supports
 `Process.fork`; otherwise `--parallel` is a no-op and specs run serially.
 
+To enable parallel runs without passing `--parallel` every time, set
+`config.default_parallel_workers`. An explicit `--parallel=N` on the
+command line always wins, and `--parallel` with no argument falls back to
+this default:
+
+```ruby
+RSpec.configure do |config|
+  config.default_parallel_workers = :number_of_processors
+  # or a fixed integer:
+  # config.default_parallel_workers = 4
+end
+```
+
+For long suites with uneven group runtimes, set
+`config.parallel_runtime_log_path` to a file path. RSpec will record
+per-group timings and, on the next run, dispatch the longest-running
+groups first so workers finish closer together:
+
+```ruby
+RSpec.configure do |config|
+  config.parallel_runtime_log_path = "tmp/parallel_runtime.log"
+end
+```
+
+The file format is one `group_id<TAB>seconds` entry per line, human-readable
+and safe to commit or cache between CI runs.
+
 ## Get Started
 
 Start with a simple example of behavior you expect from your system. Do
