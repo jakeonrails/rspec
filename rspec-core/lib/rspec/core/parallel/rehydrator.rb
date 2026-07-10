@@ -28,7 +28,17 @@ module RSpec
 
         def initialize(reporter)
           @reporter = reporter
+          @examples_by_id = {}
         end
+
+        # Serialized examples keyed by example id, each holding its
+        # latest-known state. Because `canonical_example_for` funnels every
+        # event for a given id through a single object, entries carry the
+        # final execution result (status, run_time, exception) once the
+        # example has finished. The parent uses this for example-status
+        # persistence, since its own Example objects never execute in a
+        # parallel run.
+        attr_reader :examples_by_id
 
         # Yield each WorkerPool wire message here; drives @reporter for
         # events and ignores control messages (:group_finished,
@@ -46,6 +56,7 @@ module RSpec
         def dispatch(event_name, kind, data)
           case kind
           when :example
+            data = canonical_example_for(data)
             if EXAMPLE_ROUTED.include?(event_name)
               @reporter.__send__(event_name, data)
             else
@@ -62,6 +73,21 @@ module RSpec
           else
             raise ArgumentError, "Unknown parallel payload kind: #{kind.inspect}"
           end
+        end
+
+        # The worker serializes a fresh DTO snapshot per event, so the
+        # started/finished/passed notifications for one example arrive as
+        # distinct objects -- but the Reporter assumes example identity: it
+        # stores the object it saw at `example_started` and re-reads it at
+        # dump time (JSON formatter per-example status, profiler, summary).
+        # Funnel every event through the first object seen for the id,
+        # copying the newer snapshot's fields into it, so late readers see
+        # the final execution result instead of a stale started-state stub.
+        def canonical_example_for(example)
+          canonical = @examples_by_id[example.id]
+          return @examples_by_id[example.id] = example unless canonical
+          example.each_pair { |member, value| canonical[member] = value }
+          canonical
         end
       end
     end

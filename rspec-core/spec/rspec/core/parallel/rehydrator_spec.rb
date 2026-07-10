@@ -87,7 +87,7 @@ module RSpec::Core::Parallel
     end
 
     it "wraps an :example payload in an ExampleNotification for non-routed events" do
-      ex = double("example")
+      ex = double("example", :id => "./a_spec.rb[1:1]")
       rehydrator.handle([:event, :example_custom, 0, [:example, ex]])
       expect(reporter).to have_received(:notify) do |event_name, notification|
         expect(event_name).to eq(:example_custom)
@@ -108,6 +108,36 @@ module RSpec::Core::Parallel
       expect {
         rehydrator.handle([:event, :mystery, 0, [:bogus, :stuff]])
       }.to raise_error(ArgumentError, /Unknown parallel payload kind/)
+    end
+
+    describe "example identity across events" do
+      # Workers serialize a fresh snapshot per event, but the Reporter
+      # stores the object it saw at example_started and re-reads it at dump
+      # time (JSON formatter per-example fields, profiler, persistence).
+      # Regression: without canonicalization, `--format json` emitted
+      # status:"" / run_time:null for every example under parallel.
+      it "funnels every event for an id through the object seen first, synced to the latest state" do
+        started  = serialized_example(status: nil)
+        finished = serialized_example(status: :passed)
+
+        rehydrator.handle([:event, :example_started, 0, [:example, started]])
+        rehydrator.handle([:event, :example_finished, 0, [:example, finished]])
+
+        # The reporter received the *same object* both times...
+        expect(reporter).to have_received(:example_started).with(equal(started))
+        expect(reporter).to have_received(:example_finished).with(equal(started))
+
+        # ...updated in place with the final execution result.
+        expect(started.execution_result.status).to eq(:passed)
+      end
+
+      it "exposes executed examples by id with their final results" do
+        rehydrator.handle([:event, :example_started, 0, [:example, serialized_example(status: nil)]])
+        rehydrator.handle([:event, :example_passed, 0, [:example, serialized_example(status: :passed)]])
+
+        canonical = rehydrator.examples_by_id.fetch("./a_spec.rb[1:1]")
+        expect(canonical.execution_result.status).to eq(:passed)
+      end
     end
   end
 end
