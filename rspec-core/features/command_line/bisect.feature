@@ -176,3 +176,25 @@ Feature: Bisect
       The minimal reproduction command is:
         rspec ./spec/calculator_10_spec.rb[1:1] ./spec/calculator_1_spec.rb[1:1] --seed 1234
       """
+
+  Scenario: Bisect forces serial runs even when parallel execution is configured as the default
+    Given a file named "spec/spec_helper.rb" with:
+      """
+      RSpec.configure do |c|
+        # Order-dependent failures only reproduce when the examples share
+        # one process, so bisect ignores this and runs each subset serially.
+        c.default_parallel_workers = 2
+      end
+      """
+    And a file named ".rspec" with:
+      """
+      --require spec_helper
+      """
+    When I run `rspec --seed 1234 --bisect`
+    Then bisect should succeed with output like:
+      """
+      Bisect started using options: "--seed 1234"
+      # ...
+      The minimal reproduction command is:
+        rspec ./spec/calculator_10_spec.rb[1:1] ./spec/calculator_1_spec.rb[1:1] --seed 1234
+      """
