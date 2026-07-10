@@ -1995,7 +1995,9 @@ module RSpec
       #
       #     RSpec.configure do |c|
       #       c.parallelize_setup do |worker_number|
-      #         ENV["TEST_ENV_NUMBER"] = (worker_number + 1).to_s
+      #         # parallel_tests' default TEST_ENV_NUMBER convention:
+      #         # worker 0 -> "", worker 1 -> "2", worker 2 -> "3", ...
+      #         ENV["TEST_ENV_NUMBER"] = worker_number.zero? ? "" : (worker_number + 1).to_s
       #       end
       #     end
       def parallelize_setup(&block)

@@ -27,8 +27,21 @@ Feature: `--parallel` option
   formatter pipeline.
 
   Parallel execution requires a platform that supports `Process.fork`. On
-  platforms without fork (e.g. Windows, JRuby), `--parallel` is a no-op and
-  specs run serially.
+  platforms without fork (e.g. Windows, JRuby), requesting parallel
+  execution emits a single warning and the suite runs serially.
+
+  Caveats compared to a serial run:
+
+  * Fail-fast is best-effort across workers: groups already in flight when
+    the threshold is met run to completion and report normally.
+  * Custom formatters receive serialized stand-ins for examples, groups and
+    exceptions, not the live objects. Unmarshalable metadata values degrade
+    to their `inspect` string and `metadata[:block]` is stripped.
+  * If a worker crashes twice on the same group, the run fails with a
+    synthetic error naming the group -- that group's examples appear in
+    neither the JSON output nor the summary counts.
+  * `--profile` attributes nested groups' examples to the innermost group.
+  * `--bisect` always runs serially, ignoring parallel flags and config.
 
   Background:
     Given a file named "spec/example_spec.rb" with:
@@ -78,6 +91,29 @@ Feature: `--parallel` option
     When I run `rspec --parallel=2 spec/failing_spec.rb`
     Then the output should contain "2 examples, 1 failure"
     And the exit status should be 1
+
+  Scenario: Custom formatters can read nested metadata from serialized examples
+    Given a file named "spec/group_description_formatter.rb" with:
+      """ruby
+      class GroupDescriptionFormatter
+        RSpec::Core::Formatters.register self, :example_passed
+
+        def initialize(output)
+          @output = output
+        end
+
+        def example_passed(notification)
+          # Reaches through the serialized example into nested group
+          # metadata, which must survive the worker -> parent round trip
+          # as a real hash.
+          @output.puts "group: #{notification.example.metadata[:example_group][:description]}"
+        end
+      end
+      """
+    When I run `rspec --parallel=2 --require ./spec/group_description_formatter --format GroupDescriptionFormatter spec/example_spec.rb`
+    Then the output should contain "group: group A"
+    And the output should contain "group: group D"
+    And the exit status should be 0
 
   Scenario: Using the `PARALLEL_WORKERS` environment variable instead of a flag
     Given a file named "spec/worker_number_spec.rb" with:

@@ -288,8 +288,23 @@ Run example groups across multiple fork-based worker processes with
 
 ```
 rspec --parallel=4      # 4 workers
-rspec --parallel        # one worker per CPU (Etc.nprocessors)
+rspec --parallel        # enable; worker count resolved as described below
+rspec --no-parallel     # force a serial run
 ```
+
+`--parallel=0` and `--parallel=1` run serially. The worker count is
+resolved with the following precedence (highest first):
+
+1. `--parallel=N` on the command line (or in `.rspec`)
+2. `--no-parallel` (forces serial; an explicit `--parallel=N` wins over
+   it regardless of the order the two flags appear in)
+3. the `PARALLEL_WORKERS` environment variable
+4. `config.parallel_workers`
+5. `config.default_parallel_workers`
+
+A bare `--parallel` just enables parallel execution; its count comes from
+`PARALLEL_WORKERS`, then `config.default_parallel_workers`, then one
+worker per available CPU (`Etc.nprocessors`).
 
 Each worker loads your spec files pre-fork, so startup is paid once. The
 parent runs `before(:suite)` and `after(:suite)` hooks once, straddling the
@@ -316,9 +331,11 @@ RSpec.configure do |config|
 end
 ```
 
-`RSpec.parallel_worker_number` is available inside the worker and is `nil`
-on the parent. Parallel execution requires a platform that supports
-`Process.fork`; otherwise `--parallel` is a no-op and specs run serially.
+`RSpec.parallel_worker_number` is available inside the worker (0-indexed)
+and is `nil` on the parent. Parallel execution requires a platform that
+supports `Process.fork` (MRI on Linux/macOS/BSD); on platforms without
+fork (Windows, JRuby), requesting parallel execution warns once and the
+suite runs serially.
 
 To enable parallel runs without passing `--parallel` every time, set
 `config.default_parallel_workers`. An explicit `--parallel=N` on the
@@ -334,9 +351,10 @@ end
 ```
 
 For long suites with uneven group runtimes, set
-`config.parallel_runtime_log_path` to a file path. RSpec will record
-per-group timings and, on the next run, dispatch the longest-running
-groups first so workers finish closer together:
+`config.parallel_runtime_log_path` to a file path (it defaults to `nil`;
+no log is read or written unless you opt in). RSpec will record per-group
+timings and, on the next run, dispatch the longest-running groups first so
+workers finish closer together:
 
 ```ruby
 RSpec.configure do |config|
@@ -345,7 +363,45 @@ end
 ```
 
 The file format is one `group_id<TAB>seconds` entry per line, human-readable
-and safe to commit or cache between CI runs.
+and safe to commit or cache between CI runs. Runtime balancing never
+reorders the queue when you ask for a deliberate order (e.g.
+`--order defined`).
+
+### Parallel caveats
+
+Parallel runs aim to be output-compatible with serial runs, but some
+behaviors necessarily differ:
+
+* **Fail-fast is best-effort across workers.** When the failure threshold
+  is met, the parent stops handing out new groups, but groups already
+  in flight on other workers run to completion and report normally, so
+  you may see more examples (and failures) than the configured limit.
+* **Custom formatters receive serialized stand-ins.** Workers ship
+  serialized copies of examples, groups, execution results, and
+  exceptions to the parent, which re-drives the formatter pipeline.
+  These stand-ins cover the surface RSpec's built-in formatters read
+  (including `metadata[:example_group][:description]` and other nested
+  metadata), but they are not the live objects: metadata values that
+  can't be marshalled (procs, IO objects, ActiveRecord models, ...) are
+  replaced by their `inspect` string, `metadata[:block]` is stripped,
+  and exceptions are facsimiles that expose `message` / `backtrace` /
+  `class.name` / `cause` but are not instances of the original class.
+  One visible consequence: `aggregate_failures` sub-failures are
+  rendered from the combined exception message rather than the richer
+  native multi-failure presentation.
+* **A worker crash can lose its group's examples.** If a worker dies
+  mid-group (segfault, `exit!`, OOM kill), the group is retried once on
+  another worker. If the retry also crashes, the run fails with a
+  synthetic error naming the group and worker -- but the crashed
+  group's individual examples appear in neither the JSON output nor the
+  summary counts; only the synthetic non-example error names them.
+* **`--profile` group timings key on the innermost group.** Serialized
+  groups don't carry their full ancestor chain, so per-group profile
+  aggregation attributes nested groups' examples to the innermost
+  group instead of the outermost ancestor.
+* **`--bisect` always runs serially**, ignoring parallel flags and
+  configuration: order-dependent failures only reproduce when the
+  examples share one process.
 
 ## Get Started
 

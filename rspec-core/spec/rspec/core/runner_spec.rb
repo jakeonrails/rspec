@@ -306,6 +306,34 @@ module RSpec::Core
         expect(runner).to receive(:exit).with(123)
         runner.invoke
       end
+
+      it "allows a legitimate second invoke once the first has completed" do
+        expect(runner).to receive(:run).twice.and_return(0)
+        runner.invoke
+        runner.invoke
+      end
+
+      it "does not re-enter while an invoke is in flight (autorun at_exit inside a forked worker)" do
+        call_count = 0
+        allow(runner).to receive(:run) do
+          call_count += 1
+          # Simulates the autorun at_exit hook firing while the outer
+          # invoke is still on the stack -- what a parallel worker inherits
+          # across fork.
+          runner.invoke
+          0
+        end
+
+        runner.invoke
+        expect(call_count).to eq(1)
+      end
+
+      it "clears the in-flight guard even when the run exits nonzero" do
+        allow(runner).to receive(:run) { 123 }
+        allow(runner).to receive(:exit).with(123)
+        runner.invoke
+        expect(runner.instance_variable_get(:@invoked)).to be(false)
+      end
     end
 
     describe ".run" do
