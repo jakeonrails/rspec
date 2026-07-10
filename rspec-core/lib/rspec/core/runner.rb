@@ -142,9 +142,12 @@ module RSpec
       # @private
       def run_specs_in_parallel(example_groups)
         RSpec::Support.require_rspec_core "parallel/runner"
-        Parallel::Runner.new(
+        parallel_runner = Parallel::Runner.new(
           @configuration, @world, effective_parallel_workers
-        ).run_specs(example_groups)
+        )
+        parallel_runner.run_specs(example_groups).tap do
+          @parallel_example_results = parallel_runner.executed_example_results
+        end
       end
 
       # @private
@@ -244,12 +247,28 @@ module RSpec
         return if @configuration.dry_run
         return unless (path = @configuration.example_status_persistence_file_path)
 
-        ExampleStatusPersister.persist(@world.all_examples, path)
+        ExampleStatusPersister.persist(examples_for_status_persistence, path)
       rescue SystemCallError => e
         RSpec.warning "Could not write example statuses to #{path} (configured as " \
                       "`config.example_status_persistence_file_path`) due to a " \
                       "system error: #{e.inspect}. Please check that the config " \
                       "option is set to an accessible, valid file path", :call_site => nil
+      end
+
+      # In a serial run the world's Example objects carry their own
+      # execution results. In a parallel run they never execute in this
+      # process -- results live in the serialized examples shipped back
+      # from the workers. Overlay those so persisted statuses (and thus
+      # `--only-failures`) reflect what actually ran instead of recording
+      # every example as unknown. Examples with no shipped result (not
+      # run: filtered, fail-fast abort, crashed group) fall through to the
+      # parent's unexecuted Example and persist as unknown, exactly like
+      # a serial run that never reached them.
+      def examples_for_status_persistence
+        results = @parallel_example_results
+        return @world.all_examples unless results
+
+        @world.all_examples.map { |example| results[example.id] || example }
       end
     end
   end

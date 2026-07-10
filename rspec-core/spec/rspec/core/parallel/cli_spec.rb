@@ -59,7 +59,9 @@ module RSpec::Core
       RSpec::Support.require_rspec_core "parallel/runner"
       config.parallel_workers = 3
       example_groups = [:group_a, :group_b]
-      parallel_runner = instance_double(RSpec::Core::Parallel::Runner)
+      parallel_runner = instance_double(
+        RSpec::Core::Parallel::Runner, :executed_example_results => {}
+      )
 
       expect(RSpec::Core::Parallel::Runner).to receive(:new).
         with(config, world, 3).and_return(parallel_runner)
