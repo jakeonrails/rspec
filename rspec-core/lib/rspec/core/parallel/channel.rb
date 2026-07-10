@@ -92,12 +92,23 @@ module RSpec
           io.write("#{packet.bytesize}\n#{packet}")
         end
 
+        # Any framing or payload error is reported as `nil`, exactly like
+        # EOF: a non-numeric header, a short read, or a Marshal parse
+        # failure all mean the peer died mid-write (or the stream is
+        # corrupt beyond recovery). Callers already treat `nil` as "peer
+        # is gone" -- on the parent side that routes into the
+        # worker-crashed/requeue path instead of dumping an
+        # rspec-internals backtrace at the user.
         # rubocop:disable Security/MarshalLoad
         def read_packet(io)
           header = io.gets
           return nil if header.nil?
           packet_size = Integer(header)
-          Marshal.load(io.read(packet_size))
+          packet = io.read(packet_size)
+          return nil if packet.nil? || packet.bytesize < packet_size
+          Marshal.load(packet)
+        rescue ArgumentError, TypeError, IOError, SystemCallError
+          nil
         end
         # rubocop:enable Security/MarshalLoad
       end

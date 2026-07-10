@@ -17,6 +17,36 @@ module RSpec::Core::Parallel
       expect(channel.receive_from_worker).to eq("\xF8")
     end
 
+    context "corrupt or truncated frames" do
+      # A worker killed mid-write (kill -9, segfault) leaves a partial
+      # frame in the pipe. The parent must see that as "peer is gone"
+      # (nil, same as EOF) -- never raise an rspec-internals backtrace.
+      def up_write_for(channel)
+        channel.instance_variable_get(:@up_write)
+      end
+
+      it "returns nil for a non-numeric header" do
+        channel = Channel.new
+        up_write_for(channel).write("not-a-length\ngarbage")
+        up_write_for(channel).close
+        expect(channel.receive_from_worker).to be_nil
+      end
+
+      it "returns nil for a truncated payload (fewer bytes than the header promised)" do
+        channel = Channel.new
+        up_write_for(channel).write("9999\nshort")
+        up_write_for(channel).close
+        expect(channel.receive_from_worker).to be_nil
+      end
+
+      it "returns nil for a payload that is not valid Marshal data" do
+        channel = Channel.new
+        up_write_for(channel).write("12\nnot marshal!")
+        up_write_for(channel).close
+        expect(channel.receive_from_worker).to be_nil
+      end
+    end
+
     context "across a real fork" do
       before { skip "fork not available on this platform" unless Process.respond_to?(:fork) }
 
