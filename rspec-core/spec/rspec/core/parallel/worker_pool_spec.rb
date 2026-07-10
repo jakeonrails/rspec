@@ -715,13 +715,13 @@ module RSpec::Core::Parallel
           pool.instance_variable_get(:@workers) << record
 
           with_isolated_stderr do
-            pool.send(:abort_or_force_quit) # first: abort mode, no exit
+            pool.send(:abort_or_force_quit, "INT") # first: abort mode, no exit
           end
           expect(pool.instance_variable_get(:@aborting)).to be(true)
           expect(pool).not_to have_received(:exit!)
           expect(process_alive?(sleeper_pid)).to be(true)
 
-          pool.send(:abort_or_force_quit) # second: force quit
+          pool.send(:abort_or_force_quit, "INT") # second: force quit
           expect(pool).to have_received(:exit!).with(1)
 
           deadline = Time.now + 5
@@ -736,16 +736,35 @@ module RSpec::Core::Parallel
         end
       end
 
-      it "announces abort mode on the first signal, telling the user how to force quit" do
+      it "announces abort mode on the first INT, truthfully describing teardown and the escape hatch" do
         pool = described_class.new(runner, 0)
         stderr_output = nil
 
         with_isolated_stderr do
-          pool.send(:abort_or_force_quit)
+          pool.send(:abort_or_force_quit, "INT")
           stderr_output = $stderr.string
         end
 
+        expect(stderr_output).to include("Received INT")
+        # Truthfulness: in-flight work is abandoned (not "finished"), and
+        # what actually runs is the teardown hooks.
+        expect(stderr_output).to include("abandoned")
+        expect(stderr_output).to include("`parallelize_teardown`")
         expect(stderr_output).to include("Interrupt again to force quit")
+      end
+
+      it "does not say 'Interrupt again' for TERM, which usually isn't keyboard-driven" do
+        pool = described_class.new(runner, 0)
+        stderr_output = nil
+
+        with_isolated_stderr do
+          pool.send(:abort_or_force_quit, "TERM")
+          stderr_output = $stderr.string
+        end
+
+        expect(stderr_output).to include("Received TERM")
+        expect(stderr_output).to include("Send TERM again to force quit")
+        expect(stderr_output).not_to include("Interrupt again")
       end
     end
 
@@ -862,6 +881,64 @@ module RSpec::Core::Parallel
           end
         ensure
           ENV.delete("RSPEC_SLOW_TEARDOWN_DIR")
+          FileUtils.remove_entry(dir) if File.directory?(dir)
+        end
+      end
+    end
+
+    context "slow parallelize_teardown during a user-initiated abort (first Ctrl-C)" do
+      # The first INT/TERM must give workers the same generous
+      # SHUTDOWN_TIMEOUT window as a clean shutdown -- a teardown that
+      # outlives the tight crash-path KILL_TIMEOUT (e.g. a 6s DB drop)
+      # has to survive a single Ctrl-C. The user keeps the escape hatch:
+      # a second signal force-quits immediately. With KILL_TIMEOUT
+      # stubbed below the teardown duration, this spec fails against the
+      # old behavior (worker SIGKILLed mid-teardown, no marker written).
+      it "waits past KILL_TIMEOUT for teardown to complete before escalating" do
+        require 'tmpdir'
+        stub_const("RSpec::Core::Parallel::WorkerPool::KILL_TIMEOUT", 0.2)
+
+        dir = Dir.mktmpdir("rspec-parallel-abort-teardown")
+        ENV["RSPEC_ABORT_TEARDOWN_DIR"] = dir
+
+        stub_const("RSpec::Core::Parallel::Worker", Class.new do
+          def initialize(_runner, channel, worker_number)
+            @channel = channel
+            @worker_number = worker_number
+          end
+
+          def run
+            loop do
+              msg = @channel.receive_from_parent
+              break if msg.nil?
+              sleep 30 # long enough that the INT always lands mid-group
+            end
+          ensure
+            sleep 1.0 # slow teardown, longer than the stubbed KILL_TIMEOUT
+            File.write(File.join(ENV.fetch("RSPEC_ABORT_TEARDOWN_DIR"), "teardown-#{@worker_number}.done"), "ok")
+          end
+        end)
+
+        begin
+          pool  = described_class.new(runner, 2)
+          queue = Array.new(4) { |i| "spec/abort_#{i}_spec.rb:1" }
+
+          Thread.new do
+            sleep 0.3
+            Process.kill(:INT, Process.pid)
+          end
+
+          with_isolated_stderr { pool.run(queue) { |_msg| } }
+
+          2.times do |n|
+            expect(File).to exist(File.join(dir, "teardown-#{n}.done"))
+          end
+
+          pool.instance_variable_get(:@workers).each do |w|
+            expect(process_alive?(w.pid)).to be(false)
+          end
+        ensure
+          ENV.delete("RSPEC_ABORT_TEARDOWN_DIR")
           FileUtils.remove_entry(dir) if File.directory?(dir)
         end
       end

@@ -21,25 +21,32 @@ module RSpec
       #
       #   2. Signal handling: the first SIGINT / SIGTERM to the parent
       #      marks the pool aborting, then TERMs every live worker --
-      #      workers trap TERM and exit gracefully through their teardown
-      #      hooks -- waits up to KILL_TIMEOUT, and KILLs stragglers. A
-      #      second SIGINT / SIGTERM force-quits immediately (KILL to all
-      #      workers, `exit!`), matching RSpec's documented "Interrupt
-      #      again to force quit" behavior. Pipes closed after each worker
-      #      reaps. No orphans.
+      #      workers trap TERM, abandon their in-flight work, and exit
+      #      gracefully through their `parallelize_teardown` hooks. A
+      #      user-initiated abort waits up to SHUTDOWN_TIMEOUT for that
+      #      teardown (slow DB drops must survive a single Ctrl-C; the
+      #      user holds the second-signal escape hatch), while internal
+      #      cleanup paths wait only KILL_TIMEOUT; stragglers are KILLed
+      #      either way. A second SIGINT / SIGTERM force-quits immediately
+      #      (KILL to all workers, `exit!`), matching RSpec's documented
+      #      "Interrupt again to force quit" behavior. Pipes closed after
+      #      each worker reaps. No orphans.
       #
       # @private
       class WorkerPool
-        # Grace period on the abort path (Ctrl-C, worker crash cleanup):
-        # how long a TERM'd worker gets to unwind before SIGKILL.
+        # Grace period on internal cleanup paths (crashed spawn, wedged
+        # clean-shutdown drain, abnormal exit of the run loop): how long a
+        # TERM'd worker gets to unwind before SIGKILL. Deliberately tight --
+        # these paths only run when something is already broken.
         KILL_TIMEOUT = 5.0 # seconds
 
-        # Grace period on the clean-shutdown path: after the queue is
-        # drained (or fail-fast starts draining), workers still have to
-        # run their `parallelize_teardown` hooks -- dropping per-worker
-        # databases can legitimately take a while. Deliberately much more
-        # generous than KILL_TIMEOUT, which stays tight because it only
-        # applies when the run is being torn down abnormally.
+        # Grace period wherever workers still deserve their full
+        # `parallelize_teardown` -- dropping per-worker databases can
+        # legitimately take a while. Applies to the clean end-of-run drain
+        # AND to a user-initiated abort (first Ctrl-C / TERM): a 6-second
+        # teardown must survive a single Ctrl-C. The user isn't held
+        # hostage by the generous window -- a second signal force-quits
+        # immediately.
         SHUTDOWN_TIMEOUT = 30.0 # seconds
 
         # Total dispatch attempts per group key before the pool gives up on
@@ -68,6 +75,7 @@ module RSpec
           @configuration = runner.configuration
           @workers       = []
           @aborting      = false
+          @user_abort    = false
           @draining      = false
           @attempts      = Hash.new(0)
         end
@@ -356,7 +364,12 @@ module RSpec
           end
 
           if @aborting
-            force_terminate_workers
+            # A user-initiated abort still owes the workers their
+            # teardown window (they were TERM'd, not KILLed): DB drops
+            # that take longer than KILL_TIMEOUT must not be cut short by
+            # a single Ctrl-C. The second-signal trap stays live through
+            # this wait, so the user can always force-quit.
+            force_terminate_workers(@user_abort ? SHUTDOWN_TIMEOUT : KILL_TIMEOUT)
           else
             drain_remaining_events(&block)
           end
@@ -390,9 +403,9 @@ module RSpec
           force_terminate_workers unless @workers.all?(&:exited?)
         end
 
-        def force_terminate_workers
+        def force_terminate_workers(grace=KILL_TIMEOUT)
           send_term_to_live_workers
-          wait_for_workers_to_exit
+          wait_for_workers_to_exit(grace)
           send_kill_to_stuck_workers
           wait_for_process_teardown
           @workers.each { |w| w.state = :exited }
@@ -408,8 +421,8 @@ module RSpec
           end
         end
 
-        def wait_for_workers_to_exit
-          deadline = Time.now + KILL_TIMEOUT
+        def wait_for_workers_to_exit(grace)
+          deadline = Time.now + grace
           sleep 0.05 until @workers.all? { |w| w.exited? || !process_alive?(w.pid) } || Time.now > deadline
         end
 
@@ -450,26 +463,31 @@ module RSpec
         end
 
         def install_signal_traps
-          @old_int  = Signal.trap(:INT)  { abort_or_force_quit }
-          @old_term = Signal.trap(:TERM) { abort_or_force_quit }
+          @old_int  = Signal.trap(:INT)  { abort_or_force_quit("INT") }
+          @old_term = Signal.trap(:TERM) { abort_or_force_quit("TERM") }
           @traps_installed = true
         end
 
         # First signal: flip into abort mode -- the run loop stops
-        # dispatching, TERMs the workers (which exit gracefully through
-        # their teardown hooks), and the parent still prints its summary.
-        # Second signal: the user wants out NOW. Mirror RSpec's documented
-        # serial behavior ("Interrupt again to force quit"): SIGKILL every
-        # worker and exit immediately, skipping at_exit hooks.
-        def abort_or_force_quit
+        # dispatching and TERMs the workers, which abandon their in-flight
+        # work and exit through their `parallelize_teardown` hooks (given
+        # the generous SHUTDOWN_TIMEOUT window); the parent still prints
+        # its summary. Second signal: the user wants out NOW. Mirror
+        # RSpec's documented serial behavior ("Interrupt again to force
+        # quit"): SIGKILL every worker and exit immediately, skipping
+        # at_exit hooks.
+        def abort_or_force_quit(signal_name)
           if @aborting
             kill_workers_and_force_quit
           else
-            @aborting = true
+            @aborting   = true
+            @user_abort = true
+            again = signal_name == "INT" ? "Interrupt again" : "Send #{signal_name} again"
             $stderr.puts(
-              "\nRSpec parallel runner is shutting down; workers will finish their " \
-              "in-flight group. Interrupt again to force quit (warning: worker teardown " \
-              "and at_exit hooks will be skipped if you force quit)."
+              "\nReceived #{signal_name}; RSpec parallel runner is shutting down. " \
+              "In-flight examples are being abandoned; each worker is running its " \
+              "`parallelize_teardown` hooks before exiting. #{again} to force quit " \
+              "(warning: worker teardown and at_exit hooks will be skipped if you force quit)."
             )
           end
         end
