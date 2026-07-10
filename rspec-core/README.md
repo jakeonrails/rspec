@@ -295,18 +295,26 @@ rspec --no-parallel     # force a serial run
 `--parallel=0` and `--parallel=1` run serially. The worker count is
 resolved with the following precedence (highest first):
 
-1. `--parallel=N` on the command line (or in `.rspec`)
+1. an explicit `--parallel=N`
 2. `--no-parallel` (forces serial; an explicit `--parallel=N` wins over
    it regardless of the order the two flags appear in)
 3. the `PARALLEL_WORKERS` environment variable
 4. `config.parallel_workers`
 5. `config.default_parallel_workers`
 
+The two flags can come from the command line or from an options file
+(`.rspec`, `~/.rspec`), but the sources themselves are ranked: flags
+given on the command line replace parallel flags from options files
+before the list above applies. So a command-line `--no-parallel`
+overrides a `--parallel=4` sitting in `.rspec` -- the `.rspec` flag
+never enters the resolution.
+
 A bare `--parallel` just enables parallel execution; its count comes from
 `PARALLEL_WORKERS`, then `config.default_parallel_workers`, then one
 worker per available CPU (`Etc.nprocessors`).
 
-Each worker loads your spec files pre-fork, so startup is paid once. The
+The parent process loads your spec files once, before forking; each worker
+inherits the loaded suite via copy-on-write, so startup is paid once. The
 parent runs `before(:suite)` and `after(:suite)` hooks once, straddling the
 pool. Workers run example groups pulled from a shared queue and ship
 serialized notifications back to the parent, which drives the usual
@@ -389,6 +397,15 @@ behaviors necessarily differ:
   One visible consequence: `aggregate_failures` sub-failures are
   rendered from the combined exception message rather than the richer
   native multi-failure presentation.
+* **Custom events published inside workers are not forwarded.** Only
+  RSpec's own notification events are shipped from workers to the
+  parent. An event sent with `Reporter#publish` from inside an example
+  (or a worker-side hook) reaches listeners registered in that worker
+  process only -- parent-side formatters and listeners never see it.
+  Relatedly, raw `$stdout` writes (e.g. `puts` from an example) bypass
+  the per-group event buffering and print immediately, so they can
+  appear ahead of their group's heading in `--format documentation`
+  output.
 * **A worker crash can lose its group's examples.** If a worker dies
   mid-group (segfault, `exit!`, OOM kill), the group is retried once on
   another worker. If the retry also crashes, the run fails with a

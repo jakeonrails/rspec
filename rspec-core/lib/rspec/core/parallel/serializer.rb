@@ -13,14 +13,6 @@ module RSpec
       #
       # @private
       module Serializer
-        # Keys from `Example#metadata` that core's own formatters read.
-        # Additional keys are preserved via best-effort Marshal -- see
-        # `safe_metadata`.
-        FORMATTER_METADATA_KEYS = [
-          :file_path, :line_number, :extra_failure_lines,
-          :shared_group_inclusion_backtrace, :described_class
-        ].freeze
-
         SerializedExecutionResult = Struct.new(
           :status, :run_time, :pending_message, :pending_fixed,
           :started_at, :finished_at, :exception, :example_skipped,

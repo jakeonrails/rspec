@@ -78,8 +78,10 @@ module RSpec
         return nil if value.nil? || value.empty?
 
         unless value =~ /\A\d+\z/
+          # `RSpec.warning` appends the final period -- don't end the
+          # message with one, or the output reads "Ignoring it..".
           RSpec.warning "Expected a non-negative integer value for the `PARALLEL_WORKERS` " \
-                        "environment variable, got: #{value.inspect}. Ignoring it.", :call_site => nil
+                        "environment variable, got: #{value.inspect}. Ignoring it", :call_site => nil
           return nil
         end
 
