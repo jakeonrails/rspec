@@ -431,6 +431,61 @@ module RSpec::Core::Parallel
       end
     end
 
+    context "parallelize_setup failure in a single worker" do
+      # Regression: a raising `parallelize_setup` used to exit the worker
+      # through the clean `:worker_exit` handshake -- its group requeued
+      # onto the surviving worker and the run finished GREEN (exit 0),
+      # with nothing but a stderr backtrace to hint that half the pool
+      # never ran. The failure must be loud: error-exit semantics, the
+      # worker named, while the surviving workers still drain the queue.
+      it "fails the run with error_exit_code naming the worker, still runs every example, and fires teardown once" do
+        with_isolated_rspec_state do
+          config = build_configuration
+          world  = build_world(config)
+          RSpec.instance_variable_set(:@configuration, config)
+          RSpec.instance_variable_set(:@world, world)
+          config.error_exit_code = 47
+
+          td_log = teardown_log
+          config.parallelize_setup do |n|
+            raise "boom in worker #{n}" if n == 1
+          end
+          config.parallelize_teardown do |n|
+            File.open(td_log, "a") { |f| f.puts "worker:#{n}" }
+          end
+
+          groups = Array.new(4) { |i| declare(world, "G#{i}") { it("passes") {} } }
+          world.instance_variable_set(:@example_groups_and_filters_loaded, true)
+
+          recorder = recorder_class.new
+          config.reporter.register_listener(recorder, :example_started, :example_finished, :message)
+
+          runner = described_class.new(config, world, 2)
+          exit_code = runner.run_specs(groups)
+
+          # Loud failure with error-exit (non-example failure) semantics.
+          expect(world.non_example_failure).to be(true)
+          expect(exit_code).to eq(47)
+
+          # The error names the worker, the hook, and the original error.
+          output = config.output_stream.string
+          expect(output).to include("`parallelize_setup` hook in parallel worker 1")
+          expect(output).to include("boom in worker 1")
+
+          # Degraded but complete: the surviving worker drained the whole
+          # queue, each example exactly once.
+          finished = recorder.events.select { |e| e.first == :example_finished }.map(&:last)
+          expect(finished.sort).to eq(groups.flat_map { |g| g.examples.map(&:id) }.sort)
+
+          # The failed worker's teardown fired exactly once (via the
+          # normal ensure path), not zero times and not twice.
+          teardown_lines = File.readlines(td_log).map(&:chomp)
+          expect(teardown_lines.count("worker:1")).to eq(1)
+          expect(teardown_lines.count("worker:0")).to eq(1)
+        end
+      end
+    end
+
     context "example status persistence (via Core::Runner)" do
       it "persists real statuses and run times from worker results, so --only-failures works" do
         with_isolated_rspec_state do

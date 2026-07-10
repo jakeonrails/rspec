@@ -50,6 +50,9 @@ module RSpec
 
         WorkerRecord = Struct.new(:number, :pid, :channel, :state, :current_key) do
           # state transitions: :idle -> :busy -> :idle -> ... -> :exited
+          # (a worker whose `parallelize_setup` hook raised detours through
+          # :setup_failed -- ineligible for dispatch, but its up-pipe is
+          # still read until the :worker_exit handshake arrives)
           # current_key: the group key the worker is processing right now,
           # set on dispatch and cleared on :group_finished. If the worker's
           # pipe closes while current_key is set, the worker crashed
@@ -83,8 +86,14 @@ module RSpec
         # Yields each message arriving from any worker, in arrival order:
         #   [:event, event_name, worker_number, payload]
         #   [:group_finished, key, :ok|:error, elapsed, worker_number]
+        #   [:worker_setup_failed, worker_number, serialized_exception]
         #   [:worker_crashed, worker_number, key, :requeued|:gave_up]
         #   [:worker_exit, worker_number]
+        # `:worker_setup_failed` (a raising `parallelize_setup` hook) is
+        # near-pure pass-through: the pool stops dispatching to that
+        # worker -- it is about to exit -- but the worker's dispatched
+        # key, if any, is recovered by the normal `:worker_exit`-while-busy
+        # crash path, and the *caller* decides to fail the run.
         # The event loop is intentionally kept as a single method so the
         # drain/dispatch/fail-fast ordering stays visible at one glance --
         # splitting it obscures the interleaving invariants.
@@ -265,6 +274,13 @@ module RSpec
           when :group_finished
             worker.state = :idle
             worker.current_key = nil
+          when :worker_setup_failed
+            # The worker is about to exit; never hand it (more) work.
+            # Not :exited yet -- its up-pipe must stay selected so the
+            # trailing :worker_exit handshake (which also recovers any
+            # already-dispatched key) is still read instead of being
+            # discarded with the channel.
+            worker.state = :setup_failed
           when :worker_exit
             worker.state = :exited
           end

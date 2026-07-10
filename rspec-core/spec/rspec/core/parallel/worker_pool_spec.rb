@@ -866,5 +866,53 @@ module RSpec::Core::Parallel
         end
       end
     end
+
+    context "worker announces :worker_setup_failed" do
+      # Models a raising `parallelize_setup` hook: the worker ships the
+      # distinguishable failure event, then exits through the normal
+      # handshake. The pool must pass the event through untouched and
+      # recover the worker's in-flight key (if any) so the surviving
+      # worker still drains the whole queue.
+      it "yields the event to the caller and completes every key on the surviving worker" do
+        stub_const("RSpec::Core::Parallel::Worker", Class.new do
+          def initialize(_runner, channel, worker_number)
+            @channel = channel
+            @worker_number = worker_number
+          end
+
+          def run
+            if @worker_number == 1
+              @channel.send_to_parent([:worker_setup_failed, @worker_number, "setup boom"])
+            else
+              loop do
+                msg = @channel.receive_from_parent
+                break if msg.nil?
+                _, key = msg
+                @channel.send_to_parent([:group_finished, key, :ok])
+              end
+            end
+            @channel.send_to_parent([:worker_exit, @worker_number])
+            @channel.close
+          end
+        end)
+
+        pool  = described_class.new(runner, 2)
+        queue = Array.new(4) { |i| "spec/sf_#{i}_spec.rb:1" }
+        events = []
+
+        pool.run(queue) { |msg| events << msg }
+
+        setup_failures = events.select { |e| e.first == :worker_setup_failed }
+        expect(setup_failures).to eq([[:worker_setup_failed, 1, "setup boom"]])
+
+        # Every key still completed -- worker 0 absorbed the queue,
+        # including any key that had already been dispatched to worker 1
+        # (recovered by the :worker_exit-while-busy requeue path).
+        finished_keys = events.select { |e| e.first == :group_finished }.map { |e| e[1] }
+        expect(finished_keys).to match_array(queue)
+
+        expect(events.select { |e| e.first == :worker_exit }.map { |e| e[1] }).to match_array([0, 1])
+      end
+    end
   end
 end

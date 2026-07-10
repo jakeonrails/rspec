@@ -1,4 +1,5 @@
 RSpec::Support.require_rspec_core "parallel/reporter_listener"
+RSpec::Support.require_rspec_core "parallel/serializer"
 
 module RSpec
   module Core
@@ -22,6 +23,8 @@ module RSpec
         # Worker responses on up-pipe:
         #   [:event, event_name, worker_number, payload]       (via ReporterListener)
         #   [:group_finished, key, :ok|:error, elapsed_seconds] -- request next unit
+        #   [:worker_setup_failed, worker_number, serialized_exception]
+        #                                       -- a `parallelize_setup` hook raised
         #   [:worker_exit, worker_number]                       -- clean shutdown
         #
         # `elapsed_seconds` is monotonic wall-clock time for the group
@@ -47,7 +50,7 @@ module RSpec
           RSpec.parallel_worker_number = @worker_number
           ReporterListener.install(@configuration, @channel, @worker_number)
           suppress_worker_local_fail_fast
-          @configuration.fire_parallelize_setup_hooks(@worker_number)
+          return unless fire_setup_hooks
           # Suite hooks (before/after(:suite)) run once on the parent,
           # straddling the entire pool; re-running them per worker would
           # both duplicate work and conflict on shared state.
@@ -74,6 +77,33 @@ module RSpec
         end
 
       private
+
+        # A raising `parallelize_setup` hook means this worker never got a
+        # working environment (its per-worker database is missing, a
+        # connection couldn't be established, ...). Running groups anyway
+        # would produce misattributed noise failures -- but exiting with
+        # only the normal `:worker_exit` handshake would let the run finish
+        # *green* while the surviving workers silently absorbed the queue.
+        # Ship a distinguishable event so the parent can fail the run
+        # loudly, naming this worker, while the other workers keep
+        # draining. Returns false so `#run` skips the work loop and exits
+        # through its ensure (teardown hooks fire exactly once, then the
+        # usual `:worker_exit` handshake -- which also requeues any group
+        # the parent had already dispatched to us).
+        def fire_setup_hooks
+          @configuration.fire_parallelize_setup_hooks(@worker_number)
+          true
+        rescue Exception => e # rubocop:disable Lint/RescueException -- even a SystemExit/ScriptError from a setup hook must fail the run, not vanish into a clean handshake.
+          begin
+            @channel.send_to_parent(
+              [:worker_setup_failed, @worker_number, Serializer.serialize_exception(e)]
+            )
+          rescue StandardError
+            # Pipe already gone; the parent will see EOF and treat this
+            # worker as crashed, which still fails the run.
+          end
+          false
+        end
 
         # Fail-fast is coordinated by the parent, which alone sees the
         # global failure count across all workers. If this worker's own

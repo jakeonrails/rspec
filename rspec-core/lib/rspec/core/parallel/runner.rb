@@ -165,6 +165,12 @@ module RSpec
               statuses[key] = status
               timings_out[key] = elapsed if elapsed
               stop_dispatching_if_fail_fast(pool, reporter)
+            when :worker_setup_failed
+              _, worker_number, exception = message
+              # Anything emitted before the hook raised (deprecations, ...)
+              # is still worth showing; flush it ahead of the error.
+              flush_events(buffers, worker_number, rehydrator)
+              report_worker_setup_failure(reporter, worker_number, exception)
             when :worker_crashed
               _, worker_number, key, disposition = message
               buffers.delete(worker_number)
@@ -189,6 +195,23 @@ module RSpec
           return unless reporter.fail_fast_limit_met?
           @world.wants_to_quit = true
           pool.stop_dispatching!
+        end
+
+        # A worker's `parallelize_setup` hook raised: that worker exited
+        # without running a single example (its group, if one was already
+        # dispatched, is requeued onto the surviving workers by the pool's
+        # crash path). Degraded-but-visible: the rest of the pool keeps
+        # draining the queue, but the run must fail with error-exit
+        # semantics -- `notify_non_example_exception` flips
+        # `world.non_example_failure`, exactly like a failed
+        # `before(:suite)` hook in a serial run.
+        def report_worker_setup_failure(reporter, worker_number, exception)
+          reporter.notify_non_example_exception(
+            exception,
+            "An error occurred in a `parallelize_setup` hook in parallel worker " \
+            "#{worker_number}. The worker exited without running examples; any group " \
+            "already dispatched to it has been requeued onto the remaining workers."
+          )
         end
 
         # A worker died without completing its group. A requeued attempt is
