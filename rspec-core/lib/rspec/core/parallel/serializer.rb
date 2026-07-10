@@ -162,12 +162,18 @@ module RSpec
             )
           end
 
+          # Groups are immutable for the lifetime of a worker and every
+          # example event re-ships its group (3+ events per example), so
+          # the serialized form is cached per group. Identity-keyed: the
+          # cache holds the group itself as key, so a recycled object id
+          # can never alias two groups.
           def serialize_group(group)
             return nil unless group
-            SerializedGroup.new(
+            cache = (@serialized_group_cache ||= {}.compare_by_identity)
+            cache[group] ||= SerializedGroup.new(
               group.description,
               group.parent_groups.size,
-              safe_metadata(group.metadata),
+              sanitized_group_metadata(group.metadata),
               group.respond_to?(:top_level_description) ? group.top_level_description : group.description
             )
           end
@@ -182,24 +188,97 @@ module RSpec
             )
           end
 
+          # @private -- test hook. Caches live for the worker process's
+          # lifetime in production; specs that assert cache behavior (or
+          # need pristine state) reset them here.
+          def reset_caches!
+            @serialized_group_cache = nil
+            @sanitized_group_metadata = nil
+          end
+
         private
 
           # User metadata can contain arbitrary objects (AR models, Procs,
-          # anonymous classes) that don't Marshal. Round-trip each value;
-          # on failure, replace with the `inspect` output string. Lossy but
-          # keeps the rest of the metadata usable.
+          # anonymous classes) that don't Marshal. Walk hashes and arrays
+          # recursively and replace only the unmarshalable LEAVES with
+          # their `inspect` string, so structured metadata -- notably the
+          # nested `:example_group` / `:parent_example_group` hashes that
+          # custom formatters read (`metadata[:example_group][:description]`)
+          # -- survives with its sibling keys intact. `:block` keys (the
+          # example/group procs) are stripped outright: they are never
+          # useful on the parent and would otherwise degrade to noise.
           def safe_metadata(metadata)
             return {} unless metadata
-            metadata.each_with_object({}) do |(key, value), safe|
-              safe[key] = marshal_roundtrippable?(value) ? value : value.inspect
+            sanitize_hash(metadata, {}.compare_by_identity)
+          end
+
+          # Group metadata hashes belong to the world's example groups,
+          # live for the whole worker, and are re-serialized for every
+          # event of every example beneath them. Cache the sanitized copy
+          # per hash (identity-keyed; holding the hash as key also pins it
+          # against id recycling). Trade-off: a mid-run mutation of group
+          # metadata isn't re-shipped -- per-example metadata is NOT
+          # cached, so mutable example keys like `:extra_failure_lines`
+          # still ship fresh with every event.
+          def sanitized_group_metadata(metadata)
+            return {} unless metadata
+            cache = (@sanitized_group_metadata ||= {}.compare_by_identity)
+            cache[metadata] ||= sanitize_hash(metadata, {}.compare_by_identity)
+          end
+
+          def sanitize_hash(hash, seen)
+            return safe_inspect(hash) if seen.key?(hash)
+            seen[hash] = true
+            result = hash.each_with_object({}) do |(key, value), safe|
+              next if key == :block
+              safe[sanitize_leaf(key)] =
+                if GROUP_METADATA_KEYS.include?(key) && value.is_a?(Hash)
+                  sanitized_group_metadata(value)
+                else
+                  sanitize_value(value, seen)
+                end
             end
+            seen.delete(hash)
+            result
+          end
+
+          GROUP_METADATA_KEYS = [:example_group, :parent_example_group].freeze
+
+          def sanitize_value(value, seen)
+            case value
+            when Hash  then sanitize_hash(value, seen)
+            when Array then sanitize_array(value, seen)
+            else            sanitize_leaf(value)
+            end
+          end
+
+          def sanitize_array(array, seen)
+            return safe_inspect(array) if seen.key?(array)
+            seen[array] = true
+            result = array.map { |value| sanitize_value(value, seen) }
+            seen.delete(array)
+            result
+          end
+
+          def sanitize_leaf(value)
+            marshal_roundtrippable?(value) ? value : safe_inspect(value)
           end
 
           def marshal_roundtrippable?(value)
             Marshal.dump(value)
             true
-          rescue TypeError
+          rescue StandardError
+            # TypeError covers the classically unmarshalable (Proc, IO,
+            # anonymous Class); everything else covers user objects whose
+            # `_dump` / `marshal_dump` raises an arbitrary error -- those
+            # must degrade to a stub too, not crash the group's events.
             false
+          end
+
+          def safe_inspect(value)
+            value.inspect
+          rescue StandardError
+            "#<uninspectable #{value.class}>"
           end
         end
       end

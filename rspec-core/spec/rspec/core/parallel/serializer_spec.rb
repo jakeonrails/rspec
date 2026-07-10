@@ -121,6 +121,167 @@ module RSpec::Core::Parallel
         expect(serialized.metadata[:custom_proc]).to be_a(String)
         expect(serialized.metadata[:custom_proc]).to include("Proc")
       end
+
+      it "replaces only the unmarshalable leaves inside nested hashes and arrays, keeping siblings" do
+        group = RSpec.describe("g") do
+          it("e", :nested => { :callback => proc {}, :name => "payments", :ids => [1, proc {}] }) { }
+        end
+        example = group.examples.first
+
+        serialized = Serializer.serialize_example(example)
+
+        nested = serialized.metadata[:nested]
+        expect(nested).to be_a(Hash)
+        expect(nested[:name]).to eq("payments")
+        expect(nested[:callback]).to be_a(String)
+        expect(nested[:ids][0]).to eq(1)
+        expect(nested[:ids][1]).to be_a(String)
+      end
+
+      it "keeps metadata[:example_group] a real hash whose :description survives" do
+        # Regression: the whole nested :example_group hash used to collapse
+        # into one giant inspect string (its :block key made it fail the
+        # Marshal round-trip wholesale), breaking custom formatters that
+        # read `example.metadata[:example_group][:description]`.
+        group = RSpec.describe("billing") do
+          it("charges the card") { }
+        end
+        example = group.examples.first
+
+        serialized = Serializer.serialize_example(example)
+
+        expect(serialized.metadata[:example_group]).to be_a(Hash)
+        expect(serialized.metadata[:example_group][:description]).to eq("billing")
+      end
+
+      it "survives a full Marshal round-trip with the nested group metadata intact" do
+        group = RSpec.describe("outer") do
+          describe "inner" do
+            it("e") { }
+          end
+        end.children.first
+        example = group.examples.first
+
+        restored = Marshal.load(Marshal.dump(Serializer.serialize_example(example)))
+
+        expect(restored.metadata[:example_group][:description]).to eq("inner")
+        expect(restored.metadata[:example_group][:parent_example_group][:description]).to eq("outer")
+      end
+
+      it "strips :block keys outright instead of shipping inspect noise" do
+        group = RSpec.describe("g") { it("e") { } }
+        example = group.examples.first
+
+        serialized = Serializer.serialize_example(example)
+
+        expect(serialized.metadata).not_to have_key(:block)
+        expect(serialized.metadata[:example_group]).not_to have_key(:block)
+      end
+
+      it "degrades a value whose custom _dump raises a non-TypeError instead of crashing" do
+        explosive_class = Class.new do
+          def self.name
+            "ExplosiveDump"
+          end
+
+          def _dump(_level)
+            raise "refusing to be dumped"
+          end
+
+          def inspect
+            "#<ExplosiveDump>"
+          end
+        end
+
+        group = RSpec.describe("g") do
+          it("e", :landmine => explosive_class.new) { }
+        end
+        example = group.examples.first
+
+        serialized = nil
+        expect { serialized = Serializer.serialize_example(example) }.not_to raise_error
+        expect(serialized.metadata[:landmine]).to eq("#<ExplosiveDump>")
+      end
+
+      it "stubs out a value that is neither marshalable nor inspectable" do
+        broken_class = Class.new do
+          def self.name
+            "BrokenInspect"
+          end
+
+          def _dump(_level)
+            raise TypeError, "no"
+          end
+
+          def inspect
+            raise "inspect is broken too"
+          end
+        end
+
+        group = RSpec.describe("g") do
+          it("e", :broken => broken_class.new) { }
+        end
+        example = group.examples.first
+
+        serialized = Serializer.serialize_example(example)
+        expect(serialized.metadata[:broken]).to be_a(String)
+        expect(serialized.metadata[:broken]).to include("uninspectable")
+      end
+
+      it "does not hang on cyclic user metadata" do
+        cyclic = { :name => "loop" }
+        cyclic[:self] = cyclic
+
+        group = RSpec.describe("g") do
+          it("e", :cyclic => cyclic) { }
+        end
+        example = group.examples.first
+
+        serialized = Serializer.serialize_example(example)
+        expect(serialized.metadata[:cyclic][:name]).to eq("loop")
+        expect(serialized.metadata[:cyclic][:self]).to be_a(String)
+      end
+    end
+
+    describe "payload diet (per-worker caches)" do
+      before { Serializer.reset_caches! }
+      after  { Serializer.reset_caches! }
+
+      it "serializes a group once and reuses it across the example's event cycle" do
+        group = RSpec.describe("g") { it("e") { } }
+        example = group.examples.first
+
+        first  = Serializer.serialize_example(example)
+        second = Serializer.serialize_example(example)
+
+        # Same SerializedGroup object -> the giant sanitized group metadata
+        # is built once, not once per started/passed/finished event.
+        expect(first.example_group).to equal(second.example_group)
+        expect(first.metadata[:example_group]).to equal(second.metadata[:example_group])
+      end
+
+      it "still serializes the execution result fresh on every event" do
+        group = RSpec.describe("g") { it("e") { } }
+        example = group.examples.first
+
+        first = Serializer.serialize_example(example)
+        example.execution_result.status = :passed
+        second = Serializer.serialize_example(example)
+
+        expect(second.execution_result.status).to eq(:passed)
+        expect(first.execution_result).not_to equal(second.execution_result)
+      end
+
+      it "still serializes per-example metadata fresh on every event (e.g. :extra_failure_lines)" do
+        group = RSpec.describe("g") { it("e") { } }
+        example = group.examples.first
+
+        Serializer.serialize_example(example)
+        example.metadata[:extra_failure_lines] = ["late-added diagnostic"]
+        second = Serializer.serialize_example(example)
+
+        expect(second.metadata[:extra_failure_lines]).to eq(["late-added diagnostic"])
+      end
     end
 
     describe "Marshal round-trip of a fully serialized example" do
