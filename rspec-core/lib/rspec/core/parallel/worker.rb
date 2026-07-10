@@ -116,9 +116,7 @@ module RSpec
         # threshold is actually met.
         def suppress_worker_local_fail_fast
           reporter = @configuration.reporter
-          def reporter.fail_fast_limit_met?
-            false
-          end
+          reporter.define_singleton_method(:fail_fast_limit_met?) { false }
         end
 
         def handle(message)
