@@ -109,6 +109,7 @@ module RSpec
         def run(queue, &block)
           remaining = queue.dup
           install_signal_traps
+          completed = false
 
           spawn_workers
           mark_all_idle
@@ -148,7 +149,9 @@ module RSpec
           end
 
           shutdown_workers(&block)
+          completed = true
         ensure
+          reap_abandoned_workers unless completed
           restore_signal_traps
         end
       # rubocop:enable Metrics/CyclomaticComplexity
@@ -331,6 +334,21 @@ module RSpec
           remaining.shift(remaining.size).each do |key|
             block.call([:worker_crashed, nil, key, :gave_up])
           end
+        end
+
+        # Backstop for an abnormal unwind of #run: the caller's event block
+        # can raise (a formatter bug, a Rehydrator error), and without
+        # cleanup here the N forked workers would linger until the parent
+        # process exits -- fatal for embedded runners that outlive a single
+        # RSpec run. TERM + tight KILL_TIMEOUT (this is a crash path), then
+        # close every channel. Never masks the exception that unwound #run.
+        def reap_abandoned_workers
+          force_terminate_workers
+          @workers.each { |w| close_channel_quietly(w) }
+        rescue StandardError
+          # :nocov:
+          nil
+          # :nocov:
         end
 
         def done?(remaining)

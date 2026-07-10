@@ -991,5 +991,30 @@ module RSpec::Core::Parallel
         expect(events.select { |e| e.first == :worker_exit }.map { |e| e[1] }).to match_array([0, 1])
       end
     end
+
+    context "caller's event block raises" do
+      # WorkerPool#run's block belongs to the caller (Parallel::Runner's
+      # event dispatch) and can raise -- a formatter bug, a Rehydrator
+      # error. The pool must not strand its N forked workers until parent
+      # exit (fatal for embedded runners): the ensure path reaps them and
+      # closes every channel, while the exception still propagates.
+      it "reaps all workers, closes channels, and re-raises" do
+        pool  = described_class.new(runner, 2)
+        queue = Array.new(4) { |i| "spec/raise_#{i}_spec.rb:1" }
+
+        expect {
+          pool.run(queue) { |_msg| raise ArgumentError, "listener exploded" }
+        }.to raise_error(ArgumentError, "listener exploded")
+
+        workers = pool.instance_variable_get(:@workers)
+        expect(workers.size).to eq(2)
+
+        workers.each do |w|
+          expect(process_alive?(w.pid)).to be(false)
+          expect(w.channel.up_read).to be_closed
+          expect(w.channel.down_write).to be_closed
+        end
+      end
+    end
   end
 end
