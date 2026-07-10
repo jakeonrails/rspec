@@ -75,12 +75,7 @@ module RSpec::Core
           options[:runner] = RSpec::Core::Invocations::Bisect.new
         end
 
-        parser.on('--parallel[=N]', Integer, 'Run example groups in N fork-based worker processes in parallel.',
-                  '  If N is omitted, uses the number of available CPUs.') do |n|
-          require 'etc'
-          count = n || Etc.nprocessors
-          options[:parallel_workers] = count
-        end
+        add_parallel_options(parser, options)
 
         parser.on('--[no-]fail-fast[=COUNT]', 'Abort the run after a certain number of failures (1 by default).') do |argument|
           if argument == true
@@ -314,6 +309,34 @@ FILTERING
 
     def set_fail_fast(options, value)
       options[:fail_fast] = value
+    end
+
+    def add_parallel_options(parser, options)
+      parser.on('--parallel[=N]', Integer, 'Run example groups in N fork-based worker processes in parallel.',
+                '  0 and 1 run serially. If N is omitted, uses `PARALLEL_WORKERS`,',
+                '  then `default_parallel_workers`, then the number of available CPUs.') do |n|
+        set_parallel_workers(options, n)
+      end
+
+      parser.on('--no-parallel', 'Run serially, overriding `PARALLEL_WORKERS`, `parallel_workers`',
+                '  and `default_parallel_workers`. An explicit `--parallel=N` wins',
+                '  over `--no-parallel` regardless of the order they appear in.') do
+        options[:parallel_workers] = 0 unless options[:parallel_workers].is_a?(Integer)
+      end
+    end
+
+    # A bare `--parallel` stores `true` ("enable parallel execution"); the
+    # worker count is resolved at run time (`PARALLEL_WORKERS`, then
+    # `default_parallel_workers`, then `Etc.nprocessors`) because
+    # `spec_helper.rb` -- where `default_parallel_workers` typically lives
+    # -- has not been loaded yet while options are parsed.
+    def set_parallel_workers(options, count)
+      if count && count < 0
+        abort "Invalid `--parallel` worker count: #{count}. Please provide 0 or greater " \
+              "(0 and 1 run serially; 2 or more forks that many workers)."
+      end
+      count = true if count.nil?
+      options[:parallel_workers] = count
     end
 
     def configure_only_failures(options)

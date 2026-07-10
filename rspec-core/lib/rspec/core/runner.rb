@@ -136,7 +136,12 @@ module RSpec
 
       # @private
       def parallel?
-        effective_parallel_workers >= 2 && Process.respond_to?(:fork)
+        workers = effective_parallel_workers
+        return false if workers < 2
+        return true if Process.respond_to?(:fork)
+
+        warn_fork_unavailable(workers)
+        false
       end
 
       # @private
@@ -151,21 +156,50 @@ module RSpec
       end
 
       # @private
-      # Resolution order: explicit `parallel_workers` (set via --parallel
-      # on the CLI) takes precedence; otherwise fall back to
-      # `default_parallel_workers` if configured.
+      # Resolution order for the worker count:
+      #   1. An explicit Integer in `parallel_workers` -- set by
+      #      `--parallel=N`, `--no-parallel` (0), the `PARALLEL_WORKERS`
+      #      environment variable, or `config.parallel_workers = N`.
+      #   2. `true` (a bare `--parallel`, meaning "enable parallel"):
+      #      `default_parallel_workers` when configured, otherwise one
+      #      worker per available CPU.
+      #   3. Nothing requested: `default_parallel_workers` when
+      #      configured, otherwise 0 (serial).
+      # 0 and 1 both mean serial.
       def effective_parallel_workers
-        explicit = @configuration.parallel_workers
-        return explicit unless explicit.nil?
-        case @configuration.default_parallel_workers
-        when :number_of_processors
-          require 'etc'
-          Etc.nprocessors
-        when Integer
-          @configuration.default_parallel_workers
-        else
-          0
+        requested = @configuration.parallel_workers
+        case requested
+        when Integer then requested
+        when true    then resolved_default_parallel_workers || number_of_processors
+        else              resolved_default_parallel_workers || 0
         end
+      end
+
+      # @private
+      def resolved_default_parallel_workers
+        default = @configuration.default_parallel_workers
+        case default
+        when :number_of_processors then number_of_processors
+        when Integer               then default
+        end
+      end
+
+      # @private
+      def number_of_processors
+        require 'etc'
+        Etc.nprocessors
+      end
+
+      # @private
+      # Emitted once per runner: parallel execution was asked for, but the
+      # platform can't fork (Windows, JRuby), so the run falls back to
+      # serial. Silence it by not requesting parallel execution.
+      def warn_fork_unavailable(workers)
+        return if @warned_fork_unavailable
+        @warned_fork_unavailable = true
+        RSpec.warning "Parallel execution was requested (#{workers} workers), but " \
+                      "`Process.fork` is not supported on this platform. " \
+                      "Falling back to running serially.", :call_site => nil
       end
 
       # @private

@@ -132,9 +132,15 @@ module RSpec
 
       # @macro add_setting
       # Number of fork-based workers to dispatch example groups across.
-      # `nil` or `1` disables parallel execution (serial, default).
-      # Setting to an Integer N >= 2 runs the suite across N workers.
-      # @return [Integer, nil]
+      # `nil` (default), `0`, and `1` disable parallel execution (serial).
+      # An Integer N >= 2 runs the suite across N workers. `true` means
+      # "parallel was requested without a count" (a bare `--parallel`):
+      # the count then comes from `default_parallel_workers` when
+      # configured, or the number of available CPUs.
+      # Set by `--parallel[=N]` / `--no-parallel` on the CLI and by the
+      # `PARALLEL_WORKERS` environment variable; all of those are applied
+      # with `force`, so they win over a value assigned in `RSpec.configure`.
+      # @return [Integer, true, nil]
       add_setting :parallel_workers
 
       # @macro add_setting
@@ -144,7 +150,10 @@ module RSpec
       # serial). This is the knob for running parallel by default in a
       # project's `spec_helper.rb` / `rails_helper.rb` without forcing
       # every invocation to pass `--parallel`.
-      # Precedence: `--parallel[=N]` on the CLI wins when provided.
+      # Precedence (highest first): `--parallel=N` / `--no-parallel` on
+      # the CLI, the `PARALLEL_WORKERS` environment variable,
+      # `parallel_workers`, then this setting. A bare `--parallel` uses
+      # this value as its worker count when configured.
       # @return [Integer, Symbol, nil]
       add_setting :default_parallel_workers
 
