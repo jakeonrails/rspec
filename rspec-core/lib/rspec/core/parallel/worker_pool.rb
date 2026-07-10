@@ -19,14 +19,28 @@ module RSpec
       #      won't mark us writable, and we keep draining readable pipes
       #      instead. No deadlock.
       #
-      #   2. Signal handling: SIGINT / SIGTERM to parent marks the pool
-      #      aborting, then TERMs every live worker, waits up to
-      #      KILL_TIMEOUT per worker, and KILLs stragglers. Pipes closed
-      #      after each worker reaps. No orphans.
+      #   2. Signal handling: the first SIGINT / SIGTERM to the parent
+      #      marks the pool aborting, then TERMs every live worker --
+      #      workers trap TERM and exit gracefully through their teardown
+      #      hooks -- waits up to KILL_TIMEOUT, and KILLs stragglers. A
+      #      second SIGINT / SIGTERM force-quits immediately (KILL to all
+      #      workers, `exit!`), matching RSpec's documented "Interrupt
+      #      again to force quit" behavior. Pipes closed after each worker
+      #      reaps. No orphans.
       #
       # @private
       class WorkerPool
+        # Grace period on the abort path (Ctrl-C, worker crash cleanup):
+        # how long a TERM'd worker gets to unwind before SIGKILL.
         KILL_TIMEOUT = 5.0 # seconds
+
+        # Grace period on the clean-shutdown path: after the queue is
+        # drained (or fail-fast starts draining), workers still have to
+        # run their `parallelize_teardown` hooks -- dropping per-worker
+        # databases can legitimately take a while. Deliberately much more
+        # generous than KILL_TIMEOUT, which stays tight because it only
+        # applies when the run is being torn down abnormally.
+        SHUTDOWN_TIMEOUT = 30.0 # seconds
 
         # Total dispatch attempts per group key before the pool gives up on
         # it. One retry tolerates a transient crash (OOM kill, flaky native
@@ -175,31 +189,53 @@ module RSpec
         end
 
         def spawn_workers
-          @worker_count.times do |n|
-            channel = Channel.new
-            pid = Process.fork do
-              # fork-child code; SimpleCov runs in the parent process only.
-              # :nocov:
-              # Parent installed INT/TERM traps that only set `@aborting`
-              # in the parent's scope. Children inherit those traps via
-              # fork, which neuters SIGTERM in the worker -- the parent's
-              # force_terminate_workers path would then always wait the
-              # full KILL_TIMEOUT and fall through to SIGKILL. Reset to
-              # default so SIGTERM actually terminates the worker.
-              Signal.trap(:INT,  "DEFAULT")
-              Signal.trap(:TERM, "DEFAULT")
-              channel.close_parent_ends
-              Worker.new(@runner, channel, n).run
-              # Kernel#exit (not exit!) so third-party at_exit hooks fire --
-              # e.g. Capybara's Selenium driver cleanup. Runner.invoke is
-              # idempotent across fork, so the autorun at_exit won't re-run
-              # the suite here.
-              exit(0)
-              # :nocov:
-            end
-            Process.detach(pid)
-            channel.close_worker_ends
-            @workers << WorkerRecord.new(n, pid, channel, :spawning)
+          @worker_count.times { |n| spawn_worker(n) }
+        rescue StandardError
+          # Process.fork can fail mid-loop (Errno::EAGAIN when the process
+          # table or the user's process limit is exhausted). Don't leak the
+          # workers forked before the failure: tear them down and close
+          # their channels before letting the error propagate.
+          force_terminate_workers
+          @workers.each { |w| close_channel_quietly(w) }
+          raise
+        end
+
+        def spawn_worker(number)
+          channel = Channel.new
+          begin
+            pid = fork_worker(channel, number)
+          rescue StandardError
+            channel.close
+            raise
+          end
+          Process.detach(pid)
+          channel.close_worker_ends
+          @workers << WorkerRecord.new(number, pid, channel, :spawning)
+        end
+
+        def fork_worker(channel, number)
+          Process.fork do
+            # fork-child code; SimpleCov runs in the parent process only.
+            # :nocov:
+            # A terminal-generated Ctrl-C delivers SIGINT to the entire
+            # foreground process group -- parent and workers alike. Workers
+            # ignore it: the parent alone decides how to shut down, and it
+            # coordinates the workers via SIGTERM.
+            Signal.trap(:INT, "IGNORE")
+            # Graceful SIGTERM: raise SystemExit so the worker unwinds
+            # through Worker#run's ensure (`parallelize_teardown` hooks,
+            # the :worker_exit handshake) and Kernel#at_exit hooks. The
+            # parent keeps SIGKILL as a backstop for workers wedged in
+            # uninterruptible calls (see #force_terminate_workers).
+            Signal.trap(:TERM) { exit(1) }
+            channel.close_parent_ends
+            Worker.new(@runner, channel, number).run
+            # Kernel#exit (not exit!) so third-party at_exit hooks fire --
+            # e.g. Capybara's Selenium driver cleanup. Runner.invoke is
+            # idempotent across fork, so the autorun at_exit won't re-run
+            # the suite here.
+            exit(0)
+            # :nocov:
           end
         end
 
@@ -279,13 +315,15 @@ module RSpec
 
         def reap_worker(worker)
           worker.state = :exited
-          begin
-            worker.channel.close
-          rescue
-            # :nocov:
-            nil
-            # :nocov:
-          end
+          close_channel_quietly(worker)
+        end
+
+        def close_channel_quietly(worker)
+          worker.channel.close
+        rescue StandardError
+          # :nocov:
+          nil
+          # :nocov:
         end
 
         def shutdown_workers(&block)
@@ -307,19 +345,17 @@ module RSpec
             drain_remaining_events(&block)
           end
 
-          @workers.each { |w|
-            begin
-              w.channel.close
-            rescue
-              # :nocov:
-              nil
-              # :nocov:
-            end
-          }
+          @workers.each { |w| close_channel_quietly(w) }
         end
 
+        # Clean-shutdown drain: EOF has been signaled, and each worker is
+        # finishing its in-flight group and running `parallelize_teardown`
+        # hooks before it sends :worker_exit. Wait generously -- teardown
+        # legitimately does slow work (dropping per-worker databases) --
+        # and only escalate to TERM/KILL for workers that blow through
+        # SHUTDOWN_TIMEOUT entirely.
         def drain_remaining_events(&block)
-          deadline = Time.now + KILL_TIMEOUT
+          deadline = Time.now + SHUTDOWN_TIMEOUT
           until @workers.all?(&:exited?) || Time.now > deadline
             ready, = IO.select(readable_ios, nil, nil, 0.1)
             Array(ready).each do |io|
@@ -362,9 +398,10 @@ module RSpec
         end
 
         # KILL fallback runs only when TERM + KILL_TIMEOUT didn't get
-        # the worker to exit -- now rare since worker spawn resets
-        # SIGTERM to DEFAULT, but kept as a safety net for workers
-        # stuck in uninterruptible kernel calls.
+        # the worker to exit. Workers trap TERM for a graceful teardown
+        # (SystemExit through `parallelize_teardown` + at_exit), so this
+        # is the backstop for workers wedged in uninterruptible kernel
+        # calls or whose teardown hooks refuse to finish.
         # :nocov:
         def send_kill_to_stuck_workers
           @workers.each do |w|
@@ -397,13 +434,56 @@ module RSpec
         end
 
         def install_signal_traps
-          @old_int  = Signal.trap(:INT)  { @aborting = true }
-          @old_term = Signal.trap(:TERM) { @aborting = true }
+          @old_int  = Signal.trap(:INT)  { abort_or_force_quit }
+          @old_term = Signal.trap(:TERM) { abort_or_force_quit }
+          @traps_installed = true
         end
 
+        # First signal: flip into abort mode -- the run loop stops
+        # dispatching, TERMs the workers (which exit gracefully through
+        # their teardown hooks), and the parent still prints its summary.
+        # Second signal: the user wants out NOW. Mirror RSpec's documented
+        # serial behavior ("Interrupt again to force quit"): SIGKILL every
+        # worker and exit immediately, skipping at_exit hooks.
+        def abort_or_force_quit
+          if @aborting
+            kill_workers_and_force_quit
+          else
+            @aborting = true
+            $stderr.puts(
+              "\nRSpec parallel runner is shutting down; workers will finish their " \
+              "in-flight group. Interrupt again to force quit (warning: worker teardown " \
+              "and at_exit hooks will be skipped if you force quit)."
+            )
+          end
+        end
+
+        # Runs in trap context, so keep it to async-signal-safe work:
+        # no mutexes, no IO buffering surprises. `exit!` (not `exit`)
+        # intentionally skips at_exit -- that is the documented contract
+        # of a force quit.
+        def kill_workers_and_force_quit
+          @workers.each do |w|
+            next if w.exited?
+            begin
+              Process.kill(:KILL, w.pid)
+            rescue StandardError
+              nil
+            end
+          end
+          exit!(1)
+        end
+
+        # `Signal.trap` returns `nil` for a handler that was installed
+        # from C (or with an explicit `trap(sig, nil)`), so "restore only
+        # if truthy" would leak the pool's trap into the rest of the
+        # process. Track installation explicitly and map nil back to
+        # "DEFAULT".
         def restore_signal_traps
-          Signal.trap(:INT,  @old_int)  if @old_int
-          Signal.trap(:TERM, @old_term) if @old_term
+          return unless @traps_installed
+          Signal.trap(:INT,  @old_int  || "DEFAULT")
+          Signal.trap(:TERM, @old_term || "DEFAULT")
+          @traps_installed = false
         end
       end
     end

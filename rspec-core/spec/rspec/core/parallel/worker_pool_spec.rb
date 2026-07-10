@@ -509,7 +509,7 @@ module RSpec::Core::Parallel
         trigger_sigint_after(0.3)
 
         start = Time.now
-        pool.run(queue) { |msg| events << msg }
+        with_isolated_stderr { pool.run(queue) { |msg| events << msg } }
         duration = Time.now - start
 
         # Pool exited well before all 10 * 5s items could finish, and
@@ -565,6 +565,304 @@ module RSpec::Core::Parallel
             false
           end
           expect(alive).to be(false)
+        end
+      end
+    end
+
+    def process_alive?(pid)
+      Process.kill(0, pid)
+      true
+    rescue Errno::ESRCH, Errno::EPERM
+      false
+    end
+
+    context "graceful SIGTERM shutdown of workers" do
+      # Worker shim that mimics Worker#run's structure: an ensure block
+      # standing in for `parallelize_teardown` hooks, plus a Kernel
+      # at_exit hook. When the abort path TERMs the worker mid-group,
+      # both must still run -- the worker traps TERM and exits via
+      # SystemExit rather than being killed raw.
+      before do
+        stub_const("RSpec::Core::Parallel::Worker", Class.new do
+          def initialize(_runner, channel, worker_number)
+            @channel = channel
+            @worker_number = worker_number
+            dir = ENV.fetch("RSPEC_TERM_MARKER_DIR")
+            @teardown_marker = File.join(dir, "teardown-#{worker_number}.touched")
+            at_exit { File.write(File.join(dir, "at-exit-#{worker_number}.touched"), "ok") }
+          end
+
+          def run
+            loop do
+              msg = @channel.receive_from_parent
+              break if msg.nil?
+              sleep 30 # long enough that TERM always lands mid-group
+            end
+          ensure
+            File.write(@teardown_marker, "ok")
+          end
+        end)
+      end
+
+      def trigger_sigterm_after(seconds)
+        Thread.new do
+          sleep seconds
+          Process.kill(:TERM, Process.pid)
+        end
+      end
+
+      it "runs the worker's teardown (ensure) and at_exit hooks when the abort path TERMs it" do
+        require 'tmpdir'
+        dir = Dir.mktmpdir("rspec-parallel-term")
+        ENV["RSPEC_TERM_MARKER_DIR"] = dir
+
+        begin
+          pool  = described_class.new(runner, 2)
+          queue = Array.new(4) { |i| "spec/t_#{i}_spec.rb:1" }
+
+          trigger_sigterm_after(0.3)
+
+          start = Time.now
+          with_isolated_stderr { pool.run(queue) { |_msg| } }
+          duration = Time.now - start
+
+          # Well under the TERM-then-KILL escalation window: the workers
+          # exited from the graceful trap, not from the SIGKILL backstop.
+          expect(duration).to be < 10
+
+          2.times do |n|
+            expect(File).to exist(File.join(dir, "teardown-#{n}.touched"))
+            expect(File).to exist(File.join(dir, "at-exit-#{n}.touched"))
+          end
+
+          pool.instance_variable_get(:@workers).each do |w|
+            expect(process_alive?(w.pid)).to be(false)
+          end
+        ensure
+          ENV.delete("RSPEC_TERM_MARKER_DIR")
+          FileUtils.remove_entry(dir) if File.directory?(dir)
+        end
+      end
+    end
+
+    context "SIGINT delivered directly to workers" do
+      # A terminal Ctrl-C hits the whole foreground process group, so
+      # every worker receives SIGINT alongside the parent. Workers must
+      # ignore it -- the parent coordinates shutdown via SIGTERM -- or
+      # each Ctrl-C would kill workers mid-group and misreport crashes.
+      it "is ignored: workers finish their in-flight groups normally" do
+        stub_const("RSpec::Core::Parallel::Worker", Class.new do
+          def initialize(_runner, channel, worker_number)
+            @channel = channel
+            @worker_number = worker_number
+          end
+
+          def run
+            loop do
+              msg = @channel.receive_from_parent
+              break if msg.nil?
+              _, key = msg
+              sleep 1
+              @channel.send_to_parent([:group_finished, key, :ok])
+            end
+            @channel.send_to_parent([:worker_exit, @worker_number])
+            @channel.close
+          end
+        end)
+
+        pool  = described_class.new(runner, 2)
+        queue = ["spec/a_spec.rb:1", "spec/b_spec.rb:1"]
+        events = []
+
+        # Send INT straight to the workers (not the parent) once they
+        # are mid-group.
+        Thread.new do
+          sleep 0.3
+          pool.instance_variable_get(:@workers).each do |w|
+            begin
+              Process.kill(:INT, w.pid)
+            rescue Errno::ESRCH
+              nil
+            end
+          end
+        end
+
+        pool.run(queue) { |msg| events << msg }
+
+        expect(events.select { |e| e.first == :worker_crashed }).to be_empty
+        finished_keys = events.select { |e| e.first == :group_finished }.map { |e| e[1] }
+        expect(finished_keys).to match_array(queue)
+      end
+    end
+
+    context "second interrupt escalation" do
+      # RSpec's documented contract: a second Ctrl-C force quits. The
+      # first signal flips the pool into abort mode; the second KILLs
+      # every live worker and exits the parent immediately via `exit!`.
+      it "KILLs workers and force-exits the parent on the second signal" do
+        pool = described_class.new(runner, 0)
+        allow(pool).to receive(:exit!)
+
+        sleeper_pid = Process.fork do
+          Signal.trap(:TERM, "DEFAULT")
+          sleep 600
+          exit!(0)
+        end
+        Process.detach(sleeper_pid)
+
+        begin
+          record = described_class::WorkerRecord.new(0, sleeper_pid, nil, :busy, nil)
+          pool.instance_variable_get(:@workers) << record
+
+          with_isolated_stderr do
+            pool.send(:abort_or_force_quit) # first: abort mode, no exit
+          end
+          expect(pool.instance_variable_get(:@aborting)).to be(true)
+          expect(pool).not_to have_received(:exit!)
+          expect(process_alive?(sleeper_pid)).to be(true)
+
+          pool.send(:abort_or_force_quit) # second: force quit
+          expect(pool).to have_received(:exit!).with(1)
+
+          deadline = Time.now + 5
+          sleep 0.05 while process_alive?(sleeper_pid) && Time.now < deadline
+          expect(process_alive?(sleeper_pid)).to be(false)
+        ensure
+          begin
+            Process.kill(:KILL, sleeper_pid)
+          rescue Errno::ESRCH
+            nil
+          end
+        end
+      end
+
+      it "announces abort mode on the first signal, telling the user how to force quit" do
+        pool = described_class.new(runner, 0)
+        stderr_output = nil
+
+        with_isolated_stderr do
+          pool.send(:abort_or_force_quit)
+          stderr_output = $stderr.string
+        end
+
+        expect(stderr_output).to include("Interrupt again to force quit")
+      end
+    end
+
+    context "signal trap restoration" do
+      it "restores the pre-existing trap handlers after a run" do
+        custom = proc { }
+        original_int = Signal.trap(:INT, custom)
+        begin
+          pool = described_class.new(runner, 2)
+          pool.run([]) { |_msg| }
+
+          # Reading the current handler back returns what the pool restored.
+          expect(Signal.trap(:INT, custom)).to equal(custom)
+        ensure
+          Signal.trap(:INT, original_int || "DEFAULT")
+        end
+      end
+
+      it "restores DEFAULT (not the pool's trap) when the prior handler was reported as nil" do
+        # Signal.trap returns nil for handlers installed from C extensions;
+        # a truthiness-guarded restore would leak the pool's Proc trap into
+        # the rest of the process.
+        original_int  = Signal.trap(:INT,  "DEFAULT")
+        original_term = Signal.trap(:TERM, "DEFAULT")
+
+        begin
+          pool = described_class.new(runner, 0)
+          pool.send(:install_signal_traps)
+          pool.instance_variable_set(:@old_int, nil)
+          pool.instance_variable_set(:@old_term, nil)
+          pool.send(:restore_signal_traps)
+
+          int_handler  = Signal.trap(:INT,  "DEFAULT")
+          term_handler = Signal.trap(:TERM, "DEFAULT")
+          expect(int_handler).not_to be_a(Proc)
+          expect(term_handler).not_to be_a(Proc)
+        ensure
+          Signal.trap(:INT,  original_int  || "DEFAULT")
+          Signal.trap(:TERM, original_term || "DEFAULT")
+        end
+      end
+    end
+
+    context "fork failure mid-spawn" do
+      # Errno::EAGAIN from fork(2) when the process table (or the user's
+      # process limit) is exhausted. Workers forked before the failure
+      # must not leak as orphans.
+      it "terminates the already-forked workers and re-raises" do
+        real_fork = Process.method(:fork)
+        fork_calls = 0
+        allow(Process).to receive(:fork) do |&block|
+          fork_calls += 1
+          raise Errno::EAGAIN, "fork(2)" if fork_calls == 2
+          real_fork.call(&block)
+        end
+
+        pool = described_class.new(runner, 2)
+
+        expect {
+          pool.run(["spec/a_spec.rb:1"]) { |_msg| }
+        }.to raise_error(Errno::EAGAIN)
+
+        workers = pool.instance_variable_get(:@workers)
+        expect(workers.size).to eq(1)
+        workers.each do |w|
+          expect(process_alive?(w.pid)).to be(false)
+        end
+      end
+    end
+
+    context "slow parallelize_teardown during clean shutdown" do
+      # The clean-shutdown drain must give workers far longer than the
+      # crash-path KILL_TIMEOUT: `parallelize_teardown` legitimately does
+      # slow work (dropping per-worker databases). With KILL_TIMEOUT
+      # shrunk below the teardown duration, only the generous
+      # SHUTDOWN_TIMEOUT keeps the worker alive long enough to finish.
+      it "waits past KILL_TIMEOUT for teardown to complete before escalating" do
+        require 'tmpdir'
+        stub_const("RSpec::Core::Parallel::WorkerPool::KILL_TIMEOUT", 0.2)
+
+        dir = Dir.mktmpdir("rspec-parallel-slow-teardown")
+        ENV["RSPEC_SLOW_TEARDOWN_DIR"] = dir
+
+        stub_const("RSpec::Core::Parallel::Worker", Class.new do
+          def initialize(_runner, channel, worker_number)
+            @channel = channel
+            @worker_number = worker_number
+          end
+
+          def run
+            loop do
+              msg = @channel.receive_from_parent
+              break if msg.nil?
+              _, key = msg
+              @channel.send_to_parent([:group_finished, key, :ok])
+            end
+            sleep 1.0 # slow teardown, longer than the stubbed KILL_TIMEOUT
+            File.write(File.join(ENV.fetch("RSPEC_SLOW_TEARDOWN_DIR"), "teardown-#{@worker_number}.done"), "ok")
+            @channel.send_to_parent([:worker_exit, @worker_number])
+            @channel.close
+          end
+        end)
+
+        begin
+          pool  = described_class.new(runner, 2)
+          events = []
+          pool.run(["spec/a_spec.rb:1", "spec/b_spec.rb:1"]) { |msg| events << msg }
+
+          worker_exits = events.select { |e| e.first == :worker_exit }.map { |e| e[1] }
+          expect(worker_exits).to match_array([0, 1])
+
+          2.times do |n|
+            expect(File).to exist(File.join(dir, "teardown-#{n}.done"))
+          end
+        ensure
+          ENV.delete("RSPEC_SLOW_TEARDOWN_DIR")
+          FileUtils.remove_entry(dir) if File.directory?(dir)
         end
       end
     end
