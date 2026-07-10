@@ -159,12 +159,15 @@ module RSpec
 
       # @macro add_setting
       # Path to the runtime log used by the parallel queue balancer.
-      # When present, groups are dispatched slowest-first so a single
-      # long-running group doesn't become the critical-path tail of
-      # the run. The log is rewritten after each parallel run,
-      # preserving entries for groups that didn't execute (filtered
-      # runs, Ctrl-C). Set to `nil` to disable balancing entirely.
-      # Default: `./.rspec_parallel_runtime.log`.
+      # When set, groups are dispatched slowest-first (based on the
+      # previous run's timings) so a single long-running group doesn't
+      # become the critical-path tail of the run, and the log is
+      # rewritten after each parallel run, preserving entries for groups
+      # that didn't execute (filtered runs, Ctrl-C). Balancing never
+      # overrides an explicit `--order defined`.
+      # Default: `nil` -- no log is read or written unless you opt in,
+      # e.g. `config.parallel_runtime_log_path = ".rspec_parallel_runtime.log"`
+      # (add it to your `.gitignore`).
       # @return [String, nil]
       add_setting :parallel_runtime_log_path
 
@@ -492,7 +495,7 @@ module RSpec
         @parallelize_setup_hooks       = []
         @parallelize_teardown_hooks    = []
 
-        @parallel_runtime_log_path = "./.rspec_parallel_runtime.log"
+        @parallel_runtime_log_path = nil
 
         @mock_framework = nil
         @files_or_directories_to_run = []

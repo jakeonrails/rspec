@@ -67,7 +67,7 @@ module RSpec
 
           log_path = @configuration.parallel_runtime_log_path
           prior_timings = Balancer.read_log(log_path)
-          queue = Balancer.sort_queue(queue, prior_timings)
+          queue = balanced_queue(queue, prior_timings)
 
           new_timings = {}
 
@@ -99,6 +99,23 @@ module RSpec
         end
 
       private
+
+        # LPT reordering only applies when the global ordering is the
+        # (default) random one. With `--order defined` -- or any other
+        # deliberate ordering, like `recently-modified` or a custom
+        # `register_ordering(:global)` -- the user has expressed a
+        # specific group order, and re-sorting the queue by prior
+        # runtimes would silently override it. Timings are still
+        # *written* to the log either way, so switching back to random
+        # order picks up fresh data.
+        def balanced_queue(queue, prior_timings)
+          return queue unless lpt_reordering_allowed?
+          Balancer.sort_queue(queue, prior_timings)
+        end
+
+        def lpt_reordering_allowed?
+          @configuration.ordering_registry.fetch(:global).is_a?(Ordering::Random)
+        end
 
         # Mirrors `Core::Runner#exit_code`: `error_exit_code` (when
         # configured) takes precedence for non-example failures.

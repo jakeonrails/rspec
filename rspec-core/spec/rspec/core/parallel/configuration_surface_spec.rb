@@ -39,6 +39,12 @@ module RSpec::Core
     end
   end
 
+  RSpec.describe Configuration, "parallel_runtime_log_path" do
+    it "defaults to nil so no log is written into the project unless the user opts in" do
+      expect(Configuration.new.parallel_runtime_log_path).to be_nil
+    end
+  end
+
   RSpec.describe "RSpec.parallel_worker_number" do
     # Save/restore so these tests pass even when running rspec-core's own
     # suite under --parallel -- the worker sets parallel_worker_number to

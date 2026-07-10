@@ -483,7 +483,10 @@ module RSpec::Core::Parallel
           mixed = declare(world, "Mixed") do
             it("passes") {}
             it("fails") { expect(1).to eq(2) }
-            it("is pending") { pending("wip"); raise "not done" }
+            it("is pending") do
+              pending("wip")
+              raise "not done"
+            end
           end
           world.instance_variable_set(:@example_groups_and_filters_loaded, true)
 
@@ -535,6 +538,34 @@ module RSpec::Core::Parallel
           expect(lines[a_index + 1, 3]).to match_array(["  a0", "  a1", "  a2"])
           expect(lines[b_index + 1, 3]).to match_array(["  b0", "  b1", "  b2"])
         end
+      end
+    end
+
+    context "LPT queue balancing vs. explicit ordering" do
+      let(:timings) { { "b" => 9.0, "a" => 1.0 } }
+      let(:queue)   { %w[a b] }
+
+      it "reorders the queue slowest-first under the default (random) ordering" do
+        config = build_configuration
+        runner = described_class.new(config, build_world(config), 2)
+
+        expect(runner.send(:balanced_queue, queue, timings)).to eq(%w[b a])
+      end
+
+      it "leaves the queue untouched under --order defined" do
+        config = build_configuration
+        config.force(:order => 'defined')
+        runner = described_class.new(config, build_world(config), 2)
+
+        expect(runner.send(:balanced_queue, queue, timings)).to eq(%w[a b])
+      end
+
+      it "leaves the queue untouched under a custom global ordering" do
+        config = build_configuration
+        config.register_ordering(:global) { |groups| groups }
+        runner = described_class.new(config, build_world(config), 2)
+
+        expect(runner.send(:balanced_queue, queue, timings)).to eq(%w[a b])
       end
     end
   end
