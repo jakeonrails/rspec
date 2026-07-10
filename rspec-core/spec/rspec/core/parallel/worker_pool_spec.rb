@@ -177,10 +177,230 @@ module RSpec::Core::Parallel
           crash_events = events.select { |e| e.first == :worker_crashed }
           expect(crash_events.size).to eq(1)
           expect(crash_events.first[2]).to eq("CRASH_ME")
+          expect(crash_events.first[3]).to eq(:requeued)
         ensure
           ENV.delete("RSPEC_CRASH_MARKER")
           FileUtils.remove_entry(dir) if File.directory?(dir)
         end
+      end
+    end
+
+    context "poison group (crashes every worker it lands on)" do
+      # Without the attempt cap, a group that reliably kills its host
+      # worker would be requeued forever, crashing workers one by one
+      # until the pool collapsed and every other group surfaced as
+      # crashed too.
+      it "gives up after MAX_ATTEMPTS and lets surviving workers finish the rest" do
+        stub_const("RSpec::Core::Parallel::Worker", Class.new do
+          def initialize(_runner, channel, worker_number)
+            @channel = channel
+            @worker_number = worker_number
+          end
+
+          def run
+            loop do
+              msg = @channel.receive_from_parent
+              break if msg.nil?
+              _, key = msg
+              Kernel.exit!(0) if key == "POISON"
+              @channel.send_to_parent([:group_finished, key, :ok])
+            end
+            @channel.send_to_parent([:worker_exit, @worker_number])
+            @channel.close
+          end
+        end)
+
+        pool  = described_class.new(runner, 3)
+        queue = ["POISON", "spec/a_spec.rb:1", "spec/b_spec.rb:1", "spec/c_spec.rb:1"]
+        events = []
+
+        pool.run(queue) { |msg| events << msg }
+
+        poison_crashes = events.select { |e| e.first == :worker_crashed && e[2] == "POISON" }
+        expect(poison_crashes.map { |e| e[3] }).to eq([:requeued, :gave_up])
+
+        finished_keys = events.select { |e| e.first == :group_finished }.map { |e| e[1] }
+        expect(finished_keys).to match_array(queue - ["POISON"])
+      end
+    end
+
+    context "worker announces :worker_exit while a group is in flight" do
+      # Models a spec calling `exit`: SystemExit unwinds Worker#run, whose
+      # ensure block sends :worker_exit -- but no :group_finished ever
+      # arrives for the dispatched key. The key used to silently vanish.
+      it "recovers the in-flight key exactly like a pipe-EOF crash" do
+        require 'tmpdir'
+        dir = Dir.mktmpdir("rspec-exit-test")
+        marker = File.join(dir, "exited_once")
+        ENV["RSPEC_EXIT_MARKER"] = marker
+
+        stub_const("RSpec::Core::Parallel::Worker", Class.new do
+          def initialize(_runner, channel, worker_number)
+            @channel = channel
+            @worker_number = worker_number
+          end
+
+          def run
+            loop do
+              msg = @channel.receive_from_parent
+              break if msg.nil?
+              _, key = msg
+              if key == "EXIT_ME" && !File.exist?(ENV.fetch("RSPEC_EXIT_MARKER"))
+                File.write(ENV.fetch("RSPEC_EXIT_MARKER"), "1")
+                @channel.send_to_parent([:worker_exit, @worker_number])
+                @channel.close
+                Kernel.exit!(0)
+              end
+              @channel.send_to_parent([:group_finished, key, :ok])
+            end
+            @channel.send_to_parent([:worker_exit, @worker_number])
+            @channel.close
+          end
+        end)
+
+        pool  = described_class.new(runner, 2)
+        queue = ["spec/a_spec.rb:1", "EXIT_ME", "spec/b_spec.rb:1"]
+        events = []
+
+        begin
+          pool.run(queue) { |msg| events << msg }
+
+          finished_keys = events.select { |e| e.first == :group_finished }.map { |e| e[1] }
+          expect(finished_keys).to match_array(queue)
+
+          crash_events = events.select { |e| e.first == :worker_crashed }
+          expect(crash_events.size).to eq(1)
+          expect(crash_events.first[2]).to eq("EXIT_ME")
+          expect(crash_events.first[3]).to eq(:requeued)
+        ensure
+          ENV.delete("RSPEC_EXIT_MARKER")
+          FileUtils.remove_entry(dir) if File.directory?(dir)
+        end
+      end
+    end
+
+    context "corrupt frame from a worker" do
+      # A worker killed mid-write leaves a truncated/garbage frame in the
+      # up-pipe. The parent must fold that into the normal crash/requeue
+      # path -- not raise a Marshal error at the user.
+      it "treats the sender as crashed and completes the key elsewhere" do
+        require 'tmpdir'
+        dir = Dir.mktmpdir("rspec-garble-test")
+        marker = File.join(dir, "garbled_once")
+        ENV["RSPEC_GARBLE_MARKER"] = marker
+
+        stub_const("RSpec::Core::Parallel::Worker", Class.new do
+          def initialize(_runner, channel, worker_number)
+            @channel = channel
+            @worker_number = worker_number
+          end
+
+          def run
+            loop do
+              msg = @channel.receive_from_parent
+              break if msg.nil?
+              _, key = msg
+              if key == "GARBLE" && !File.exist?(ENV.fetch("RSPEC_GARBLE_MARKER"))
+                File.write(ENV.fetch("RSPEC_GARBLE_MARKER"), "1")
+                io = @channel.instance_variable_get(:@up_write)
+                io.write("12\nnot marshal!")
+                io.flush
+                Kernel.exit!(0)
+              end
+              @channel.send_to_parent([:group_finished, key, :ok])
+            end
+            @channel.send_to_parent([:worker_exit, @worker_number])
+            @channel.close
+          end
+        end)
+
+        pool  = described_class.new(runner, 2)
+        queue = ["spec/a_spec.rb:1", "GARBLE", "spec/b_spec.rb:1"]
+        events = []
+
+        begin
+          expect { pool.run(queue) { |msg| events << msg } }.not_to raise_error
+
+          finished_keys = events.select { |e| e.first == :group_finished }.map { |e| e[1] }
+          expect(finished_keys).to match_array(queue)
+
+          crash_events = events.select { |e| e.first == :worker_crashed }
+          expect(crash_events.map { |e| e[2] }).to eq(["GARBLE"])
+        ensure
+          ENV.delete("RSPEC_GARBLE_MARKER")
+          FileUtils.remove_entry(dir) if File.directory?(dir)
+        end
+      end
+    end
+
+    context "EPIPE on dispatch (worker died while idle)" do
+      # A worker that dies between groups leaves its down-pipe with no
+      # reader; the next dispatch write raises Errno::EPIPE. The parent
+      # must fold that into the crash path (requeue the key, reap the
+      # record) rather than aborting the run with a broken-pipe backtrace.
+      # Exercised directly (no fork): racing a real worker's close against
+      # the parent's dispatch is inherently nondeterministic.
+      it "requeues the key and reaps the worker instead of raising" do
+        pool    = described_class.new(runner, 0)
+        channel = Channel.new
+        channel.instance_variable_get(:@down_read).close # no reader anywhere -> EPIPE on write
+
+        dead_pid = Process.fork { exit!(0) }
+        Process.waitpid(dead_pid)
+
+        record = described_class::WorkerRecord.new(7, dead_pid, channel, :idle, nil)
+        pool.instance_variable_get(:@workers) << record
+        remaining = ["spec/a_spec.rb:1"]
+
+        expect { pool.send(:dispatch_to, record, remaining) }.not_to raise_error
+
+        expect(remaining).to eq(["spec/a_spec.rb:1"]) # key back in the queue
+        expect(record.exited?).to be(true)
+        expect(record.current_key).to be_nil
+      end
+    end
+
+    context "stop_dispatching! (parent-coordinated fail-fast)" do
+      # The caller flips the pool into drain mode from inside the event
+      # block (as Parallel::Runner does when the fail-fast threshold is
+      # met): in-flight groups finish and report, undispatched keys are
+      # simply never run -- and never misreported as crashes.
+      it "finishes in-flight groups, skips the rest, and shuts down cleanly" do
+        stub_const("RSpec::Core::Parallel::Worker", Class.new do
+          def initialize(_runner, channel, worker_number)
+            @channel = channel
+            @worker_number = worker_number
+          end
+
+          def run
+            loop do
+              msg = @channel.receive_from_parent
+              break if msg.nil?
+              _, key = msg
+              sleep 0.05
+              @channel.send_to_parent([:group_finished, key, :ok])
+            end
+            @channel.send_to_parent([:worker_exit, @worker_number])
+            @channel.close
+          end
+        end)
+
+        pool  = described_class.new(runner, 2)
+        queue = Array.new(8) { |i| "spec/ff_#{i}_spec.rb:1" }
+        events = []
+
+        pool.run(queue) do |msg|
+          events << msg
+          pool.stop_dispatching! if msg.first == :group_finished
+        end
+
+        finished = events.select { |e| e.first == :group_finished }
+        # The two in-flight groups (one per worker) complete; nothing else
+        # is dispatched after the first :group_finished flips drain mode.
+        expect(finished.size).to be_between(1, 2)
+
+        expect(events.select { |e| e.first == :worker_crashed }).to be_empty
+        expect(events.select { |e| e.first == :worker_exit }.map { |e| e[1] }).to match_array([0, 1])
       end
     end
 

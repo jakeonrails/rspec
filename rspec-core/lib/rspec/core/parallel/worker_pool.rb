@@ -28,6 +28,12 @@ module RSpec
       class WorkerPool
         KILL_TIMEOUT = 5.0 # seconds
 
+        # Total dispatch attempts per group key before the pool gives up on
+        # it. One retry tolerates a transient crash (OOM kill, flaky native
+        # extension) without letting a poison group -- one that crashes
+        # every worker it lands on -- cascade through the whole pool.
+        MAX_ATTEMPTS = 2
+
         WorkerRecord = Struct.new(:number, :pid, :channel, :state, :current_key) do
           # state transitions: :idle -> :busy -> :idle -> ... -> :exited
           # current_key: the group key the worker is processing right now,
@@ -45,17 +51,30 @@ module RSpec
           @configuration = runner.configuration
           @workers       = []
           @aborting      = false
+          @draining      = false
+          @attempts      = Hash.new(0)
+        end
+
+        # Fail-fast support: the caller invokes this (typically from inside
+        # the `run` block, on seeing a failure that meets the fail-fast
+        # threshold) to stop handing out new work. Undispatched keys stay
+        # unrun -- mirroring serial fail-fast, which never reaches them --
+        # while workers currently mid-group finish and report normally,
+        # after which every worker is shut down via the usual EOF handshake.
+        def stop_dispatching!
+          @draining = true
         end
 
         # queue: an array of group lookup keys (source-location strings).
         # Yields each message arriving from any worker, in arrival order:
         #   [:event, event_name, worker_number, payload]
-        #   [:group_finished, key, :ok|:error]
+        #   [:group_finished, key, :ok|:error, elapsed, worker_number]
+        #   [:worker_crashed, worker_number, key, :requeued|:gave_up]
         #   [:worker_exit, worker_number]
         # The event loop is intentionally kept as a single method so the
         # drain/dispatch/fail-fast ordering stays visible at one glance --
         # splitting it obscures the interleaving invariants.
-        # rubocop:disable Metrics/CyclomaticComplexity, Metrics/MethodLength
+        # rubocop:disable Metrics/CyclomaticComplexity
         def run(queue, &block)
           remaining = queue.dup
           install_signal_traps
@@ -73,36 +92,25 @@ module RSpec
 
             # Rule #1: drain first, dispatch second.
             Array(ready_read).each do |io|
-              worker = worker_for_up_read(io)
-              message = worker.channel.receive_from_worker
-
-              if message.nil?
-                requeue_if_crashed_mid_group(worker, remaining, &block)
-                reap_worker(worker)
-              else
-                update_worker_state(worker, message)
-                block&.call(message)
-              end
+              receive_from(worker_for_up_read(io), remaining, &block)
             end
 
             Array(ready_write).each do |io|
               next if remaining.empty?
               worker = worker_for_down_write(io)
-              next unless worker&.idle? && !@aborting
-              key = remaining.shift
-              worker.channel.send_to_worker([:run_group, key])
-              worker.state = :busy
-              worker.current_key = key
+              next unless worker&.idle? && !@aborting && !@draining
+              dispatch_to(worker, remaining)
             end
 
             break if @aborting
 
-            # Fail-fast: if every worker has exited but work remains
-            # (all workers crashed, or all exited before draining the
-            # queue), further selects are all-empty and loop forever.
-            # Surface a synthetic :worker_crashed per remaining key so
-            # the reporter registers them as failures, then bail out.
-            if remaining.any? && @workers.all?(&:exited?)
+            # If every worker has exited but work remains (all workers
+            # crashed, or all exited before draining the queue), further
+            # selects are all-empty and loop forever. Surface a synthetic
+            # :worker_crashed per remaining key so the reporter registers
+            # them as failures, then bail out. Not applicable while
+            # draining: leftover keys are then intentionally unrun.
+            if remaining.any? && !@draining && @workers.all?(&:exited?)
               drain_remaining_as_crashed(remaining, &block)
               break
             end
@@ -112,9 +120,59 @@ module RSpec
         ensure
           restore_signal_traps
         end
-      # rubocop:enable Metrics/CyclomaticComplexity, Metrics/MethodLength
+      # rubocop:enable Metrics/CyclomaticComplexity
 
       private
+
+        def receive_from(worker, remaining, &block)
+          message = worker.channel.receive_from_worker
+
+          if message.nil?
+            handle_worker_crash(worker, remaining, &block)
+            reap_worker(worker)
+          else
+            # A worker announcing :worker_exit while still holding a key
+            # hit SystemExit mid-group (e.g. a spec called `exit`); the
+            # group's outcome never arrived, so recover exactly as for a
+            # pipe-EOF crash before recording the exit.
+            handle_worker_crash(worker, remaining, &block) if message.first == :worker_exit
+            update_worker_state(worker, message)
+            block&.call(annotate(worker, message))
+          end
+        end
+
+        def dispatch_to(worker, remaining)
+          key = remaining.shift
+          begin
+            worker.channel.send_to_worker([:run_group, key])
+          rescue Errno::EPIPE
+            # The worker died while idle (its end of the down-pipe has no
+            # reader). Put the key back for another worker and reap this
+            # one; TERM is a no-op if the process is already gone but
+            # ensures a wedged-yet-alive worker doesn't outlive the run.
+            remaining.unshift(key)
+            begin
+              Process.kill(:TERM, worker.pid)
+            rescue Errno::ESRCH
+              nil
+            end
+            reap_worker(worker)
+            return
+          end
+          @attempts[key] += 1
+          worker.state = :busy
+          worker.current_key = key
+        end
+
+        # The wire-level :group_finished a worker sends doesn't carry its
+        # worker number; the parent-side event buffering in Parallel::Runner
+        # needs it to know which worker's buffered events to flush. Rebuild
+        # the message with the number appended.
+        def annotate(worker, message)
+          return message unless message.first == :group_finished
+          _, key, status, elapsed = message
+          [:group_finished, key, status, elapsed, worker.number]
+        end
 
         def spawn_workers
           @worker_count.times do |n|
@@ -154,7 +212,7 @@ module RSpec
         end
 
         def writable_ios_for_dispatch(remaining)
-          return [] if @aborting || remaining.empty?
+          return [] if @aborting || @draining || remaining.empty?
           @workers.select(&:idle?).map { |w| w.channel.down_write }
         end
 
@@ -176,18 +234,28 @@ module RSpec
           end
         end
 
-        # Called when a worker's pipe closes unexpectedly. If the worker was
-        # holding a key (crashed mid-group rather than after clean shutdown),
-        # unshift it back so the next idle worker picks it up, and emit a
-        # synthetic :worker_crashed event so the caller can surface it.
+        # Called when a worker stops without completing its group: pipe EOF,
+        # a corrupt/truncated frame, or a :worker_exit that arrives while a
+        # key is still in flight (SystemExit raised by a spec). If the
+        # worker was holding a key, the group's outcome never arrived:
+        # unshift it back so another worker picks it up -- unless the key
+        # has already burned MAX_ATTEMPTS, in which case the caller is told
+        # we gave up so it can attribute a visible failure. The disposition
+        # travels in the yielded event:
+        #   [:worker_crashed, worker_number, key, :requeued | :gave_up]
         # No-op during @aborting: the caller is giving up, not redistributing.
-        def requeue_if_crashed_mid_group(worker, remaining, &block)
+        def handle_worker_crash(worker, remaining, &block)
           return if @aborting
           return unless worker.current_key
           crashed_key = worker.current_key
           worker.current_key = nil
-          remaining.unshift(crashed_key)
-          block&.call([:worker_crashed, worker.number, crashed_key])
+
+          if @attempts[crashed_key] >= MAX_ATTEMPTS || @draining
+            block&.call([:worker_crashed, worker.number, crashed_key, :gave_up])
+          else
+            remaining.unshift(crashed_key)
+            block&.call([:worker_crashed, worker.number, crashed_key, :requeued])
+          end
         end
 
         # Called when we detect that every worker is :exited but the
@@ -201,12 +269,12 @@ module RSpec
         def drain_remaining_as_crashed(remaining, &block)
           return unless block
           remaining.shift(remaining.size).each do |key|
-            block.call([:worker_crashed, nil, key])
+            block.call([:worker_crashed, nil, key, :gave_up])
           end
         end
 
         def done?(remaining)
-          remaining.empty? && @workers.all? { |w| w.exited? || w.idle? }
+          (remaining.empty? || @draining) && @workers.all? { |w| w.exited? || w.idle? }
         end
 
         def reap_worker(worker)

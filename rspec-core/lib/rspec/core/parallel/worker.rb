@@ -46,6 +46,7 @@ module RSpec
         def run
           RSpec.parallel_worker_number = @worker_number
           ReporterListener.install(@configuration, @channel, @worker_number)
+          suppress_worker_local_fail_fast
           @configuration.fire_parallelize_setup_hooks(@worker_number)
           # Suite hooks (before/after(:suite)) run once on the parent,
           # straddling the entire pool; re-running them per worker would
@@ -62,11 +63,33 @@ module RSpec
             # Teardown errors must not prevent worker_exit -- otherwise the
             # parent never learns this worker has stopped and waits KILL_TIMEOUT.
           end
-          @channel.send_to_parent([:worker_exit, @worker_number])
-          @channel.close
+          begin
+            @channel.send_to_parent([:worker_exit, @worker_number])
+            @channel.close
+          rescue StandardError
+            # The parent may already have closed its ends (it treats a quiet
+            # pipe as this worker crashing); nothing useful to do from here,
+            # and raising would just splat a backtrace onto shared stderr.
+          end
         end
 
       private
+
+        # Fail-fast is coordinated by the parent, which alone sees the
+        # global failure count across all workers. If this worker's own
+        # reporter were allowed to trip the limit, it would set
+        # `RSpec.world.wants_to_quit` inside this process and every
+        # subsequently dispatched group would be skipped by
+        # `ExampleGroup.run` (returns nil) -- yet still reported back to
+        # the parent as `:error` despite never running. Neuter the local
+        # check; the parent stops dispatching new groups once the global
+        # threshold is actually met.
+        def suppress_worker_local_fail_fast
+          reporter = @configuration.reporter
+          def reporter.fail_fast_limit_met?
+            false
+          end
+        end
 
         def handle(message)
           case message.first
