@@ -736,6 +736,23 @@ module RSpec::Core::Parallel
         end
       end
 
+      it "swallows the kill race with an already-reaped worker and still force-exits" do
+        pool = described_class.new(runner, 0)
+        allow(pool).to receive(:exit!)
+
+        dead_pid = Process.fork { exit!(0) }
+        Process.waitpid(dead_pid) # fully reaped: KILLing this pid raises ESRCH
+
+        record = described_class::WorkerRecord.new(0, dead_pid, nil, :busy, nil)
+        pool.instance_variable_get(:@workers) << record
+        pool.instance_variable_set(:@aborting, true)
+
+        expect {
+          pool.send(:abort_or_force_quit, "INT")
+        }.not_to raise_error
+        expect(pool).to have_received(:exit!).with(1)
+      end
+
       it "announces abort mode on the first INT, truthfully describing teardown and the escape hatch" do
         pool = described_class.new(runner, 0)
         stderr_output = nil
