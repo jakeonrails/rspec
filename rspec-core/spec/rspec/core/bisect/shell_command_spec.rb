@@ -57,6 +57,25 @@ module RSpec::Core
         end
       end
 
+      it "forces each run serial with `--no-parallel` (bisect needs examples in one process)" do
+        cmd = command_for([])
+        expect(cmd.shellsplit.count("--no-parallel")).to eq(1)
+      end
+
+      %w[ --parallel --parallel=4 ].each do |value|
+        it "strips a user-supplied `#{value}` so it cannot outrank the injected `--no-parallel`" do
+          original_cli_args << value
+          cmd = command_for([])
+          expect(cmd.shellsplit).not_to include(value)
+        end
+      end
+
+      it "does not duplicate a user-supplied `--no-parallel`" do
+        original_cli_args << "--no-parallel"
+        cmd = command_for([])
+        expect(cmd.shellsplit.count("--no-parallel")).to eq(1)
+      end
+
       it 'uses the bisect formatter' do
         cmd = command_for([])
         expect(cmd).to include("--format bisect")
@@ -192,6 +211,11 @@ module RSpec::Core
       it 'does not include `--bisect` even though the original args do' do
         original_cli_args << "--bisect"
         expect(repro_command_from(%w[ ./foo.rb[1:1] ])).to exclude("bisect")
+      end
+
+      it 'does not include parallel flags: the repro must run the examples serially in one process' do
+        original_cli_args << "--parallel=4"
+        expect(repro_command_from(%w[ ./foo.rb[1:1] ])).to exclude("parallel")
       end
 
       it 'quotes the ids on a shell like ZSH that requires it' do

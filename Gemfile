@@ -34,6 +34,9 @@ gem 'tsort', '0.1.0' if RUBY_VERSION.to_f < 3.1
 gem 'aruba', '>= 2.3.3', '< 3.0.0'
 gem 'coderay' # syntax highlighting
 gem 'rake', '>= 13.0.0'
+# On Ruby >= 3.2 aruba 2.4 pulls in irb -> rdoc, and rdoc 8 depends on rbs,
+# whose native extension does not build on JRuby. Keep rdoc 7 there.
+gem 'rdoc', '< 8', :require => false if RUBY_ENGINE == 'jruby'
 gem "thread_order", "~> 1.1.0"
 
 # No need to run rubocop on earlier versions

@@ -87,6 +87,13 @@ module RSpec
               c.reset_reporter
               c.output_stream = @spec_output
               c.error_stream = @spec_output
+              # Bisect runs must stay serial: order-dependent failures only
+              # reproduce when the examples share one process, and each
+              # dispatched run's results are captured by a formatter inside
+              # this class's forked child. Forcing 0 makes a
+              # `default_parallel_workers` (or `parallel_workers`) picked up
+              # from spec files a no-op.
+              c.force(:parallel_workers => 0)
             end
           end
 

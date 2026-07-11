@@ -54,6 +54,38 @@ module RSpec
             [:libs, :requires].include?(key) ? oldval + newval : newval
           end
         end
+
+        apply_env_parallel_workers
+      end
+
+      # `PARALLEL_WORKERS` (Rails / parallel_tests parity) supplies a worker
+      # count when no explicit `--parallel=N` / `--no-parallel` was given on
+      # the command line or in an options file. Applying it here means it is
+      # forced into the configuration before spec files load, so it ranks
+      # above `parallel_workers` / `default_parallel_workers` set in
+      # `RSpec.configure` -- and below any explicit CLI count, which is
+      # already an Integer by this point. A bare `--parallel` only asks to
+      # *enable* parallel execution, so the env var supplies its count too.
+      def apply_env_parallel_workers
+        return if @options[:parallel_workers].is_a?(Integer)
+
+        env_workers = parallel_workers_from_env
+        @options[:parallel_workers] = env_workers if env_workers
+      end
+
+      def parallel_workers_from_env
+        value = ENV['PARALLEL_WORKERS']
+        return nil if value.nil? || value.empty?
+
+        unless value =~ /\A\d+\z/
+          # `RSpec.warning` appends the final period -- don't end the
+          # message with one, or the output reads "Ignoring it..".
+          RSpec.warning "Expected a non-negative integer value for the `PARALLEL_WORKERS` " \
+                        "environment variable, got: #{value.inspect}. Ignoring it", :call_site => nil
+          return nil
+        end
+
+        Integer(value, 10)
       end
 
       UNFORCED_OPTIONS = Set.new([

@@ -12,7 +12,14 @@ module RSpec
         attr_reader :original_cli_args
 
         def initialize(original_cli_args)
-          @original_cli_args = original_cli_args.reject { |arg| arg.start_with?("--bisect") }
+          # `--bisect` would infinitely recurse. Parallel flags are stripped
+          # because bisect requires serial, deterministic runs: an
+          # order-dependent failure only reproduces when the examples share
+          # one process, so `--parallel` would corrupt the bisection (and
+          # the printed repro command).
+          @original_cli_args = original_cli_args.reject do |arg|
+            arg.start_with?("--bisect", "--parallel") || arg == "--no-parallel"
+          end
         end
 
         def command_for(locations, server)
@@ -23,6 +30,10 @@ module RSpec
 
           parts << "--format"   << "bisect-drb"
           parts << "--drb-port" << server.drb_port
+          # Force each bisect run serial, overriding a `PARALLEL_WORKERS`
+          # env var (inherited by the spawned process) or a
+          # `default_parallel_workers` configured in spec files.
+          parts << "--no-parallel"
 
           parts.concat(reusable_cli_options)
           parts.concat(locations.map { |l| escape(l) })
